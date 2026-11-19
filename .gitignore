@@ -1,0 +1,14 @@
+build/
+build-core2/
+managed_components/
+sdkconfig
+sdkconfig.old
+dependencies.lock
+settings*.json
+tests/build/
+backup/
+share.env
+ripper.env
+web/firmware/
+local/
+__pycache__/

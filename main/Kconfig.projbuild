@@ -1,0 +1,19 @@
+menu "Flüstertüte"
+
+config PLAYER_NAS_SYNOLOGY
+    bool "NAS access through a Synology share link"
+    default y
+    help
+        File Station share link: the device holds only the link's password.
+
+config PLAYER_NAS_WEBDAV
+    bool "NAS access through WebDAV"
+    default y
+    help
+        Any WebDAV server (Synology, QNAP, Nextcloud, ...). Off saves a few KB of flash.
+
+config PLAYER_SETUP_URL
+    string "Address of the setup website, shown when the device has no settings"
+    default "fluestertuete.zeromips.org"
+
+endmenu
