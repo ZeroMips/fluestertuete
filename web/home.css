@@ -192,3 +192,19 @@ footer.bottom p:first-child { font-style: italic; }
 
 /* logo: a plain cone megaphone, no electronics */
 .brand img { width: 44px; height: 44px; }
+
+/* screenshots in a device-like frame */
+.gallery { display: flex; flex-wrap: wrap; justify-content: center; gap: 22px 18px; padding-bottom: 8px; }
+.gallery .shot { flex: 0 1 300px; }
+.shot { margin: 0; }
+.bezel { background: #2b2622; padding: 10px; border-radius: 20px; box-shadow: 0 6px 0 rgba(0,0,0,.10); }
+.bezel img { display: block; width: 100%; height: auto; border-radius: 8px; }
+.shot figcaption { color: var(--dim); font-size: .95rem; margin-top: 10px; text-align: center; }
+.rip-shot { width: 100%; max-width: 340px; justify-self: center; align-self: start; margin-top: 40px; }
+.rip-shot .bezel { background: #e86f1f; }
+.rip-shot figcaption { color: var(--text); }
+@media (max-width: 760px) {
+  .gallery { flex-wrap: nowrap; justify-content: flex-start; overflow-x: auto; scroll-snap-type: x mandatory; }
+  .gallery .shot { flex: 0 0 78%; scroll-snap-align: center; }
+  .rip-shot { margin-top: 0; order: -1; max-width: 300px; }
+}

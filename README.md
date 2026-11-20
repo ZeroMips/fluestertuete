@@ -67,6 +67,8 @@ idf.py -B build-core2 -D SDKCONFIG=build-core2/sdkconfig -D SDKCONFIG_DEFAULTS=s
        -D IDF_TARGET=esp32 build flash               # Core2 (ESP32), into build-core2/
 tools/make_config.py settings.json --flash /dev/ttyACM0   # settings only; positions stay
 tests/run.sh                                         # host tests (decoder vs. ffmpeg, parsers, settings block)
+tools/screenshot.py /dev/ttyACM0 shot.png --scale 2  # screenshot of the running device ('s' on the console)
+tools/make_logo.py                                   # web/logo.svg -> main/logo_img.c (start screen)
 tools/web_bundle.py && python3 -m http.server -d web # the setup website with your builds, on localhost
 ```
 

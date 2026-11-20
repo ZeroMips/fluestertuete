@@ -6,6 +6,7 @@
 #include "esp_app_desc.h"
 #include "flash_guard.h"
 #include "i18n.h"
+#include "screenshot.h"
 #include "index.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -39,18 +40,19 @@ void app_main(void)
     nas_init();
     index_init();
     ui_init(board_init());
+    screenshot_init();
 
     if (!config()->valid || !nas_supported()) {
-        // Nothing to connect to: say where to set the device up, and stay here.
+        // Nothing to connect to: say where to set the device up, and stay here (below logo and name).
         // Without any settings the language is unknown: then both.
         char text[320];
         str_t why = config()->valid ? S_FW_NO_NAS_TYPE : (str_t)(S_CFG_MISSING + config()->error - CFG_ERR_MISSING);
         if (config()->error == CFG_ERR_MISSING)
-            snprintf(text, sizeof(text), "Fl\xC3\xBCstert\xC3\xBCte\n\n%s\n%s\n\n%s / %s\n%s\n\n%s \xC2\xB7 %s",
+            snprintf(text, sizeof(text), "%s\n%s\n\n%s / %s\n%s\n%s \xC2\xB7 %s",
                      tr_lang(why, LANG_DE), tr_lang(why, LANG_EN), tr_lang(S_SETUP_AT, LANG_DE), tr_lang(S_SETUP_AT, LANG_EN),
                      CONFIG_PLAYER_SETUP_URL, BOARD_NAME, esp_app_get_description()->version);
         else
-            snprintf(text, sizeof(text), "Fl\xC3\xBCstert\xC3\xBCte\n\n%s\n\n%s\n%s\n\n%s \xC2\xB7 %s", tr(why), tr(S_SETUP_AT),
+            snprintf(text, sizeof(text), "%s\n\n%s\n%s\n%s \xC2\xB7 %s", tr(why), tr(S_SETUP_AT),
                      CONFIG_PLAYER_SETUP_URL, BOARD_NAME, esp_app_get_description()->version);
         ui_boot_message(text);
         return;

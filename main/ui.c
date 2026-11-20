@@ -32,6 +32,10 @@ LV_FONT_DECLARE(font_roboto_20);
 #define COLOR_ACCENT lv_color_hex(0xFFB020)
 #define COLOR_DIM lv_color_hex(0x9AA3B2)
 #define COLOR_TEXT lv_color_hex(0xFFFFFF)
+#define COLOR_BRAND lv_color_hex(0xF08A3E)  // the logo's orange, as on the website
+
+extern const lv_image_dsc_t logo_img;  // logo_img.c, from web/logo.svg
+static void one_line(lv_obj_t *l);
 
 #define HEADER_H 36
 #define ROW_H 46
@@ -207,6 +211,7 @@ static void show_track_list(void)
         v->count = count;
     }
     nas_free_entries(tracks, count);
+    lv_label_set_text(v->title, lv_label_get_text(s_pl.album));  // the album, as in the player's top bar
     show_view(V_TRACKS);
     list_select_anim(v, st.track, LV_ANIM_OFF);
 }
@@ -323,6 +328,7 @@ static void add_row(list_view_t *v, row_t *r, int index, const char *text, const
     lv_obj_set_width(l, lv_pct(100));
     lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_font(l, &font_roboto_20, 0);
+    one_line(l);
     if (sub) {
         lv_obj_align(l, LV_ALIGN_TOP_LEFT, 0, -4);
         lv_obj_t *s2 = lv_label_create(b);
@@ -330,6 +336,7 @@ static void add_row(list_view_t *v, row_t *r, int index, const char *text, const
         lv_obj_set_width(s2, lv_pct(100));
         lv_label_set_long_mode(s2, LV_LABEL_LONG_DOT);
         lv_obj_set_style_text_font(s2, &font_roboto_16, 0);
+        one_line(s2);
         lv_obj_set_style_text_color(s2, COLOR_DIM, 0);
         lv_obj_set_style_text_color(s2, COLOR_TEXT, LV_STATE_CHECKED);
         lv_obj_align(s2, LV_ALIGN_BOTTOM_LEFT, 0, 4);
@@ -378,6 +385,12 @@ static lv_obj_t *make_label(lv_obj_t *parent, int x, int y, int w, const lv_font
     return l;
 }
 
+// One line, with "…" or scrolling: LVGL only stops wrapping a label whose height is fixed.
+static void one_line(lv_obj_t *l)
+{
+    lv_obj_set_height(l, lv_font_get_line_height(lv_obj_get_style_text_font(l, LV_PART_MAIN)));
+}
+
 static void list_view_create(list_view_t *v, lv_obj_t *parent)
 {
     v->root = make_page(parent);
@@ -388,6 +401,7 @@ static void list_view_create(list_view_t *v, lv_obj_t *parent)
     lv_obj_add_flag(v->ripper, LV_OBJ_FLAG_HIDDEN);
     v->title = make_label(v->root, 56, 8, 156, &font_roboto_16, COLOR_DIM);
     lv_label_set_long_mode(v->title, LV_LABEL_LONG_DOT);
+    one_line(v->title);
     v->battery = make_label(v->root, 216, 8, 52, &font_roboto_16, COLOR_DIM);
     // Mirrors the list button on the player: back to what is playing. Shown once an album is loaded.
     v->player = make_button(v->root, 272, 2, 44, HEADER_H - 4, LV_SYMBOL_AUDIO, A_PLAYER);
@@ -411,6 +425,7 @@ static void player_view_create(lv_obj_t *parent)
     make_button(p, 272, 2, 44, HEADER_H - 4, LV_SYMBOL_LIST, A_TRACKS);
     s_pl.album = make_label(p, 56, 8, 160, &font_roboto_16, COLOR_DIM);
     lv_label_set_long_mode(s_pl.album, LV_LABEL_LONG_DOT);
+    one_line(s_pl.album);
     s_pl.battery = make_label(p, 216, 8, 52, &font_roboto_16, COLOR_DIM);
     lv_obj_set_style_text_align(s_pl.battery, LV_TEXT_ALIGN_RIGHT, 0);
     s_pl.title = make_label(p, 10, 44, 300, &font_roboto_20, COLOR_TEXT);
@@ -503,6 +518,7 @@ static void ripper_view_create(lv_obj_t *parent)
     lv_label_set_long_mode(s_rip.title, LV_LABEL_LONG_SCROLL_CIRCULAR);
     s_rip.sub = make_label(p, 10, 86, 300, &font_roboto_16, COLOR_DIM);
     lv_label_set_long_mode(s_rip.sub, LV_LABEL_LONG_DOT);
+    one_line(s_rip.sub);
     s_rip.bar = lv_bar_create(p);
     lv_obj_set_pos(s_rip.bar, 10, 110);
     lv_obj_set_size(s_rip.bar, 300, 8);
@@ -512,6 +528,7 @@ static void ripper_view_create(lv_obj_t *parent)
     lv_obj_set_style_bg_color(s_rip.bar, COLOR_ACCENT, LV_PART_INDICATOR);
     s_rip.type = make_label(p, 10, 124, 300, &font_roboto_16, COLOR_DIM);
     lv_label_set_long_mode(s_rip.type, LV_LABEL_LONG_DOT);
+    one_line(s_rip.type);
 
     static const str_t labels[RIP_FORCE + 1] = {S_BTN_KIDS, S_CLS_SPOKEN, S_CLS_MUSIC, S_CLS_UNSORTED, S_EJECT, S_RIP_ANYWAY};
     for (int i = 0; i <= RIP_FORCE; i++) {
@@ -1119,10 +1136,18 @@ void ui_init(lv_display_t *disp)
     lv_obj_set_style_text_font(scr, &font_roboto_16, 0);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
+    // Start screen: logo and name, below them what the device is doing (or where to set it up).
     s_boot = make_page(scr);
-    s_boot_label = make_label(s_boot, 20, 0, 280, &font_roboto_20, COLOR_TEXT);
+    lv_obj_t *logo = lv_image_create(s_boot);
+    lv_image_set_src(logo, &logo_img);
+    lv_obj_align(logo, LV_ALIGN_TOP_MID, 0, 10);
+    lv_obj_t *name = make_label(s_boot, 0, 0, 300, &font_roboto_20, COLOR_BRAND);
+    lv_label_set_text(name, "Fl\xC3\xBCstert\xC3\xBCte");
+    lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(name, LV_ALIGN_TOP_MID, 0, 92);
+    s_boot_label = make_label(s_boot, 0, 0, 300, &font_roboto_16, COLOR_DIM);
     lv_obj_set_style_text_align(s_boot_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_center(s_boot_label);
+    lv_obj_align(s_boot_label, LV_ALIGN_TOP_MID, 0, 126);
     list_view_create(&s_browse, scr);
     list_view_create(&s_tracks, scr);
     list_view_create(&s_search, scr);

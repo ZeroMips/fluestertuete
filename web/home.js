@@ -27,6 +27,20 @@ const TEXTS = {
     rip_bt: "Derselbe Pi spielt auf Wunsch über einen Bluetooth-Lautsprecher. Die Flüstertüte wird dann zur Fernbedienung, mit Lautstärke, Vor- und Zurückspulen.",
     rip_need: "Dafür brauchen Sie zusätzlich einen Raspberry Pi und ein USB-CD-Laufwerk. Die Software für den Pi wird gerade für alle aufbereitet und erscheint hier in Kürze; die Flüstertüte kann sie schon heute steuern. Ohne Station funktioniert die Flüstertüte genauso, mit Hörspielen, die schon auf dem NAS liegen.",
     rip_art_title: "Eine CD, darunter das Laufwerk, ein Pfeil führt nach unten aufs NAS",
+    shots_title: "So sieht sie aus",
+    shots_lead: "Echte Bildschirmfotos vom Gerät (M5Stack Core2), mit einer Beispiel-Bibliothek.",
+    shot_home: "Die Startliste: oben „Weiterhören“, darunter die Serien.",
+    shot_home_alt: "Liste mit Weiterhören und den Serien Detektivbüro Kieselstein, Die Mondbären, Fridolin der Drache",
+    shot_series: "Eine Serie mit ihren Folgen, in der richtigen Reihenfolge.",
+    shot_series_alt: "Liste der Folgen von Fridolin der Drache",
+    shot_player: "Der Player: große Tasten, 30 Sekunden vor und zurück, Lautstärke.",
+    shot_player_alt: "Abspielansicht mit Titel, Fortschrittsbalken und großen Tasten",
+    shot_tracks: "Alle Titel eines Hörspiels, der laufende ist markiert.",
+    shot_tracks_alt: "Titelliste eines Hörspiels",
+    shot_start: "Beim Einschalten: verbindet sich mit WLAN und NAS.",
+    shot_start_alt: "Startbildschirm mit Flüstertüten-Logo",
+    shot_ripper: "Die CD-Ripstation auf der Flüstertüte: Fortschritt, Einordnung, Auswerfen.",
+    shot_ripper_alt: "Ripper-Ansicht: Rippen 62 Prozent, Typ Kinder, zuletzt fertig Die Mondbären",
     how_title: "So funktioniert’s",
     how_1_t: "1. Ihre Hörspiele",
     how_1: "liegen als MP3-Dateien auf Ihrem NAS – ein Ordner pro Hörspiel. Zum Beispiel von Ihren eigenen CDs.",
@@ -120,6 +134,20 @@ const TEXTS = {
     rip_bt: "The same Pi can play through a Bluetooth speaker if you like. Flüstertüte then becomes the remote control, with volume, skipping and seeking.",
     rip_need: "For this you also need a Raspberry Pi and a USB CD drive. The Pi software is being prepared for everyone and will appear here soon; Flüstertüte can already control it today. Without the station Flüstertüte works just the same, with stories already on your NAS.",
     rip_art_title: "A CD above a drive, with an arrow pointing down to the NAS",
+    shots_title: "What it looks like",
+    shots_lead: "Real screenshots from the device (M5Stack Core2) with a sample library. The device also speaks English, as in the first picture.",
+    shot_home: "The home list: “Continue” at the top, the series below.",
+    shot_home_alt: "List with Continue and the series Detektivbüro Kieselstein, Die Mondbären, Fridolin der Drache",
+    shot_series: "A series with its episodes, in the right order.",
+    shot_series_alt: "List of the episodes of Fridolin der Drache",
+    shot_player: "The player: big buttons, 30 seconds back and forth, volume.",
+    shot_player_alt: "Player screen with title, progress bar and big buttons",
+    shot_tracks: "All tracks of a story, the current one highlighted.",
+    shot_tracks_alt: "Track list of a story",
+    shot_start: "When switched on: connecting to Wi-Fi and the NAS.",
+    shot_start_alt: "Start screen with the Flüstertüte logo",
+    shot_ripper: "The CD ripping station on Flüstertüte: progress, sorting, eject.",
+    shot_ripper_alt: "Ripper screen: ripping 62 percent, type children, last finished Die Mondbären",
     how_title: "How it works",
     how_1_t: "1. Your stories",
     how_1: "sit on your NAS as MP3 files, one folder per story. Ripped from your own CDs, for example.",
@@ -199,6 +227,11 @@ function setLang(l) {
   for (const el of document.querySelectorAll("[data-t]")) {
     const text = TEXTS[lang][el.dataset.t];
     if (text !== undefined) el.innerHTML = text;
+  }
+  for (const el of document.querySelectorAll("[data-alt]")) el.alt = TEXTS[lang][el.dataset.alt] || "";
+  for (const img of document.querySelectorAll("img[data-src-en]")) {
+    img.dataset.srcDe ??= img.getAttribute("src");
+    img.src = lang === "en" ? img.dataset.srcEn : img.dataset.srcDe;
   }
   for (const b of document.querySelectorAll("[data-lang]")) b.setAttribute("aria-pressed", String(b.dataset.lang === lang));
 }
