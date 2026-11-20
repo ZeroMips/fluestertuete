@@ -86,3 +86,5 @@ main.legal { padding-top: 24px; padding-bottom: 40px; }
 @media (max-width: 520px) {
   header { flex-direction: column; }
 }
+.home-link { color: var(--dim); text-decoration: none; font-size: .9rem; }
+.home-link:hover { color: var(--accent); }

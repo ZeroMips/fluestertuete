@@ -1,4 +1,4 @@
-// Page texts. Keys are used as data-t attributes in index.html and by app.js.
+// Page texts. Keys are used as data-t attributes in setup.html and by app.js.
 export const TEXTS = {
   de: {
     title: "Flüstertüte einrichten",

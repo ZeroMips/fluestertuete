@@ -4,7 +4,7 @@ A handheld player for children's audio stories (Hörspiele) that streams them fr
 No figurines to buy, no cloud, no account: the stories stay where they already are, and the device only talks to
 your Wi-Fi and your NAS. Made for a son who has outgrown shelves of CDs.
 
-**Set it up:** <https://fluestertuete.zeromips.org/> flashes the firmware and your settings straight from the
+**Set it up:** <https://fluestertuete.zeromips.org/> explains the project; its setup page flashes the firmware and your settings straight from the
 browser (Chrome or Edge on a computer), or gives you a package for `esptool` (Firefox, Safari).
 
 ## Devices
@@ -14,7 +14,8 @@ browser (Chrome or Edge on a computer), or gives you a package for `esptool` (Fi
 | [LilyGo T-Deck](https://www.lilygo.cc/products/t-deck) (ESP32-S3) | touch, trackball, keyboard | search by typing |
 | [M5Stack Core2](https://docs.m5stack.com/en/core/core2) v1.1 (ESP32, AXP2101) | touch, three touch buttons | no search yet |
 
-Both need nothing else: built-in speaker, battery, display.
+Both need nothing else: built-in speaker and display. The Core2 has a battery built in; the T-Deck runs from a
+USB power supply alone, or from an added battery to carry it around.
 
 ## What it does
 

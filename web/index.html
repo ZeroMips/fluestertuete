@@ -4,15 +4,21 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Flüstertüte</title>
+<meta name="description" content="Ein kleiner Hörspiel-Player für Kinder, der die eigenen Hörspiele per WLAN vom NAS spielt. Ohne Figuren, ohne Cloud, ohne Konto.">
+<link rel="icon" href="favicon.ico" sizes="48x48">
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="stylesheet" href="style.css">
-<script type="module" src="app.js"></script>
+<link rel="stylesheet" href="home.css">
+<script type="module" src="home.js"></script>
 </head>
-<body>
-<header>
-  <div>
-    <h1 data-t="title">Flüstertüte einrichten</h1>
-    <p class="tagline" data-t="tagline"></p>
-  </div>
+<body class="home">
+
+<header class="top">
+  <a class="brand" href="./">
+    <img src="logo.svg" alt="" width="44" height="44">
+    Flüstertüte
+  </a>
   <nav class="lang" aria-label="Sprache / Language">
     <button type="button" data-lang="de">Deutsch</button>
     <button type="button" data-lang="en">English</button>
@@ -20,100 +26,199 @@
 </header>
 
 <main>
-  <p id="browser-missing" class="warn" data-t="browser_missing" hidden></p>
-  <p class="note" data-t="privacy"></p>
-
-  <form id="setup" autocomplete="off" novalidate>
-    <section>
-      <h2 data-t="s_device"></h2>
-      <fieldset class="choices" id="boards">
-        <legend data-t="board"></legend>
-        <!-- filled from firmware/index.json -->
-      </fieldset>
-      <label><span data-t="device_lang"></span>
-        <select id="lang"><option value="de">Deutsch</option><option value="en">English</option></select>
-      </label>
-    </section>
-
-    <section>
-      <h2 data-t="s_wifi"></h2>
-      <label><span data-t="wifi_ssid"></span><input id="wifi_ssid" required maxlength="32"></label>
-      <label><span data-t="wifi_password"></span><input id="wifi_password" type="password" maxlength="64"></label>
-    </section>
-
-    <section>
-      <h2 data-t="s_nas"></h2>
-      <fieldset class="choices">
-        <legend data-t="nas_type"></legend>
-        <label class="choice"><input type="radio" name="nas_type" value="synology" checked> <span data-t="type_synology"></span></label>
-        <label class="choice"><input type="radio" name="nas_type" value="webdav"> <span data-t="type_webdav"></span></label>
-      </fieldset>
-
-      <div data-nas="synology">
-        <p class="help" data-t="help_synology"></p>
-        <label><span data-t="share_link"></span><input id="share_link" required placeholder="https://…/sharing/…">
-          <small data-t="share_link_hint"></small></label>
-        <label><span data-t="share_password"></span><input id="share_password" type="password"></label>
-        <label><span data-t="nas_url"></span><input id="nas_url_synology" required placeholder="https://192.168.1.10:5001">
-          <small data-t="nas_url_hint"></small></label>
+  <!-- Hero -->
+  <section class="hero">
+    <div class="hero-text">
+      <h1 data-t="hero_title"></h1>
+      <p class="lead" data-t="hero_lead"></p>
+      <div class="cta">
+        <a class="btn primary" href="setup.html" data-t="cta_setup"></a>
+        <a class="btn" href="#so-gehts" data-t="cta_how"></a>
       </div>
+      <a class="rip-teaser" href="#cd-station"><span class="disc" aria-hidden="true"></span><span data-t="rip_teaser"></span></a>
+      <ul class="badges">
+        <li data-t="badge_free"></li>
+        <li data-t="badge_noads"></li>
+        <li data-t="badge_lang"></li>
+      </ul>
+    </div>
+    <svg class="hero-art" viewBox="0 0 360 320" role="img" aria-labelledby="hero-art-title">
+      <title id="hero-art-title" data-t="art_title"></title>
+      <circle cx="180" cy="165" r="140" class="f-sun"/>
+      <!-- moon and stars: it is a bedtime thing -->
+      <path d="M58 52a26 26 0 1 0 30 34 21 21 0 1 1-30-34z" class="f-moon"/>
+      <path d="M300 44l4 9 9 4-9 4-4 9-4-9-9-4 9-4z" class="f-star"/>
+      <path d="M40 220l3 6 6 3-6 3-3 6-3-6-6-3 6-3z" class="f-star"/>
+      <path d="M318 250l2.5 5 5 2.5-5 2.5-2.5 5-2.5-5-5-2.5 5-2.5z" class="f-star"/>
+      <!-- sound waves -->
+      <path d="M268 120a60 60 0 0 1 0 90" class="s-wave"/>
+      <path d="M288 100a90 90 0 0 1 0 130" class="s-wave w2"/>
+      <path d="M308 82a118 118 0 0 1 0 166" class="s-wave w3"/>
+      <text x="300" y="150" class="note n1">♪</text>
+      <text x="66" y="150" class="note n2">♫</text>
+      <text x="96" y="270" class="note n3">♪</text>
+      <!-- the device -->
+      <g class="device">
+        <rect x="100" y="62" width="160" height="208" rx="30" class="f-accent"/>
+        <rect x="100" y="62" width="160" height="208" rx="30" class="f-shine"/>
+        <rect x="116" y="80" width="128" height="96" rx="12" class="f-screen"/>
+        <rect x="128" y="94" width="58" height="8" rx="4" class="f-screen-text"/>
+        <rect x="128" y="110" width="88" height="6" rx="3" class="f-screen-dim"/>
+        <circle cx="180" cy="142" r="13" class="f-screen-text"/>
+        <path d="M176 135v14l11-7z" class="f-screen"/>
+        <rect x="128" y="162" width="104" height="5" rx="2.5" class="f-screen-dim"/>
+        <rect x="128" y="162" width="46" height="5" rx="2.5" class="f-accent"/>
+        <!-- buttons, a smile -->
+        <circle cx="140" cy="208" r="12" class="f-button"/>
+        <circle cx="180" cy="208" r="12" class="f-button"/>
+        <circle cx="220" cy="208" r="12" class="f-button"/>
+        <path d="M160 240q20 16 40 0" class="s-smile"/>
+      </g>
+    </svg>
+  </section>
 
-      <div data-nas="webdav" hidden>
-        <p class="help" data-t="help_webdav"></p>
-        <label><span data-t="dav_url"></span><input id="nas_url_webdav" required placeholder="https://192.168.1.10:5006">
-          <small data-t="dav_url_hint"></small></label>
-        <label><span data-t="dav_user"></span><input id="dav_user"></label>
-        <label><span data-t="dav_password"></span><input id="dav_password" type="password"></label>
+  <!-- What it is -->
+  <section class="intro">
+    <p data-t="intro_1"></p>
+    <p class="quote" data-t="intro_2"></p>
+  </section>
+
+  <!-- How it works -->
+  <section id="so-gehts" class="block">
+    <h2 data-t="how_title"></h2>
+    <ol class="flow">
+      <li class="c-sun">
+        <svg viewBox="0 0 64 64" aria-hidden="true"><rect x="12" y="10" width="40" height="44" rx="6" class="f-card"/><rect x="18" y="18" width="28" height="6" rx="3" class="f-ink"/><rect x="18" y="30" width="28" height="6" rx="3" class="f-ink"/><circle cx="42" cy="46" r="3" class="f-ink"/></svg>
+        <h3 data-t="how_1_t"></h3><p data-t="how_1"></p>
+      </li>
+      <li class="c-sky">
+        <svg viewBox="0 0 64 64" aria-hidden="true"><path d="M10 26a32 32 0 0 1 44 0" class="s-ink"/><path d="M18 34a20 20 0 0 1 28 0" class="s-ink"/><path d="M26 42a8 8 0 0 1 12 0" class="s-ink"/><circle cx="32" cy="50" r="4" class="f-ink"/></svg>
+        <h3 data-t="how_2_t"></h3><p data-t="how_2"></p>
+      </li>
+      <li class="c-leaf">
+        <svg viewBox="0 0 64 64" aria-hidden="true"><path d="M14 38v-6a18 18 0 0 1 36 0v6" class="s-ink"/><rect x="10" y="36" width="12" height="18" rx="5" class="f-ink"/><rect x="42" y="36" width="12" height="18" rx="5" class="f-ink"/></svg>
+        <h3 data-t="how_3_t"></h3><p data-t="how_3"></p>
+      </li>
+    </ol>
+  </section>
+
+  <!-- CD ripping station -->
+  <section id="cd-station" class="rip">
+    <div class="rip-text">
+      <p class="kicker" data-t="rip_kicker"></p>
+      <h2 data-t="rip_title"></h2>
+      <p class="lead" data-t="rip_lead"></p>
+      <ol class="rip-flow">
+        <li data-t="rip_f1"></li>
+        <li data-t="rip_f2"></li>
+        <li data-t="rip_f3"></li>
+        <li data-t="rip_f4"></li>
+      </ol>
+      <h3 data-t="rip_remote_t"></h3>
+      <p data-t="rip_remote"></p>
+      <h3 data-t="rip_bt_t"></h3>
+      <p data-t="rip_bt"></p>
+      <p class="sub" data-t="rip_need"></p>
+    </div>
+    <svg class="rip-art" viewBox="0 0 300 300" role="img" aria-labelledby="rip-art-title">
+      <title id="rip-art-title" data-t="rip_art_title"></title>
+      <circle cx="150" cy="150" r="130" class="f-sky"/>
+      <g class="cd">
+        <circle cx="150" cy="128" r="78" class="f-cd"/>
+        <circle cx="150" cy="128" r="78" class="s-cd"/>
+        <path d="M150 50a78 78 0 0 1 67 38l-67 40z" class="f-cd-shine"/>
+        <circle cx="150" cy="128" r="22" class="f-cd-ring"/>
+        <circle cx="150" cy="128" r="9" class="f-sky"/>
+      </g>
+      <rect x="70" y="214" width="160" height="40" rx="12" class="f-accent"/>
+      <rect x="92" y="230" width="116" height="8" rx="4" class="f-screen"/>
+      <path d="M150 248v34m-12-12 12 12 12-12" class="s-arrow"/>
+    </svg>
+  </section>
+
+  <!-- For the kids -->
+  <section class="block">
+    <h2 data-t="kids_title"></h2>
+    <ul class="features">
+      <li><span class="ico" aria-hidden="true">👆</span><div><h3 data-t="kids_1_t"></h3><p data-t="kids_1"></p></div></li>
+      <li><span class="ico" aria-hidden="true">🔖</span><div><h3 data-t="kids_2_t"></h3><p data-t="kids_2"></p></div></li>
+      <li><span class="ico" aria-hidden="true">🔎</span><div><h3 data-t="kids_3_t"></h3><p data-t="kids_3"></p></div></li>
+      <li><span class="ico" aria-hidden="true">🌙</span><div><h3 data-t="kids_4_t"></h3><p data-t="kids_4"></p></div></li>
+      <li><span class="ico" aria-hidden="true">🛡️</span><div><h3 data-t="kids_5_t"></h3><p data-t="kids_5"></p></div></li>
+      <li><span class="ico" aria-hidden="true">✨</span><div><h3 data-t="kids_6_t"></h3><p data-t="kids_6"></p></div></li>
+    </ul>
+  </section>
+
+  <!-- What you need -->
+  <section class="block">
+    <h2 data-t="need_title"></h2>
+    <p class="sub" data-t="need_lead"></p>
+    <div class="devices">
+      <div class="device-card">
+        <h3>LilyGo T-Deck</h3>
+        <p data-t="dev_tdeck"></p>
       </div>
-
-      <label><span data-t="root"></span><input id="root" required placeholder="/Hörspiele">
-        <small id="root-hint"></small></label>
-
-      <details>
-        <summary data-t="advanced"></summary>
-        <label><span data-t="tls_name"></span><input id="tls_name"><small data-t="tls_name_hint"></small></label>
-        <label><span data-t="ca_pem"></span><textarea id="ca_pem" rows="4" spellcheck="false"></textarea>
-          <small data-t="ca_pem_hint"></small></label>
-        <label><span data-t="dlna_url"></span><input id="dlna_url"><small data-t="dlna_url_hint"></small></label>
-      </details>
-    </section>
-
-    <section>
-      <h2 data-t="s_extras"></h2>
-      <p class="help" data-t="extras_hint"></p>
-      <label><span data-t="ripper_url"></span><input id="ripper_url"><small data-t="ripper_url_hint"></small></label>
-      <label><span data-t="ripper_password"></span><input id="ripper_password" type="password"></label>
-      <label><span data-t="boombox_url"></span><input id="boombox_url"><small data-t="boombox_url_hint"></small></label>
-    </section>
-
-    <section>
-      <h2 data-t="s_flash"></h2>
-      <p class="help" data-t="flash_hint"></p>
-      <label class="choice"><input type="checkbox" id="erase_all"> <span data-t="erase_all"></span></label>
-      <div class="buttons">
-        <button type="button" id="install" class="primary" data-t="btn_install"></button>
-        <button type="button" id="settings-only" data-t="btn_settings_only"></button>
+      <div class="device-card">
+        <h3>M5Stack Core2 <span class="tag">v1.1</span></h3>
+        <p data-t="dev_core2"></p>
       </div>
-      <div class="buttons small">
-        <button type="button" id="save" data-t="btn_save"></button>
-        <button type="button" id="load" data-t="btn_load"></button>
-        <input type="file" id="load-file" accept="application/json,.json" hidden>
-      </div>
-      <p class="help" data-t="save_hint"></p>
-      <details id="offline-box">
-        <summary data-t="offline"></summary>
-        <p class="help" data-t="offline_hint"></p>
-        <div class="buttons small"><button type="button" id="package" data-t="btn_package"></button></div>
-      </details>
-      <progress id="progress" max="100" value="0" hidden></progress>
-      <ul id="status" aria-live="polite"></ul>
-      <details id="raw-log-box" hidden><summary>Log</summary><pre id="raw-log"></pre></details>
-    </section>
-  </form>
+    </div>
+    <ul class="checklist">
+      <li data-t="need_nas"></li>
+      <li data-t="need_mp3"></li>
+      <li data-t="need_pc"></li>
+      <li data-t="need_time"></li>
+    </ul>
+    <div class="tree-box">
+      <p data-t="tree_lead"></p>
+      <pre class="tree" aria-label="Ordnerstruktur"><span class="dir">Hörspiele/</span>
+├── <span class="dir">Fridolin der Drache/</span>
+│   ├── <span class="dir" data-t="tree_ep1"></span>   <span class="album" data-t="tree_album"></span>
+│   │   ├── 01 Der Anfang.mp3
+│   │   └── 02 Über den Wolken.mp3
+│   └── <span class="dir" data-t="tree_ep2"></span>
+└── <span class="dir" data-t="tree_night"></span>
+    └── 01.mp3</pre>
+      <p class="sub" data-t="tree_note"></p>
+    </div>
+  </section>
+
+  <!-- Setup steps -->
+  <section class="block">
+    <h2 data-t="steps_title"></h2>
+    <ol class="steps">
+      <li><h3 data-t="step_1_t"></h3><p data-t="step_1"></p></li>
+      <li><h3 data-t="step_2_t"></h3><p data-t="step_2"></p></li>
+      <li><h3 data-t="step_3_t"></h3><p data-t="step_3"></p></li>
+      <li><h3 data-t="step_4_t"></h3><p data-t="step_4"></p></li>
+    </ol>
+    <div class="cta center"><a class="btn primary big" href="setup.html" data-t="cta_setup"></a></div>
+  </section>
+
+  <!-- The name -->
+  <section class="name-box">
+    <h2 data-t="name_title"></h2>
+    <p data-t="name_text"></p>
+  </section>
+
+  <!-- FAQ -->
+  <section class="block">
+    <h2 data-t="faq_title"></h2>
+    <div class="faq">
+      <details><summary data-t="faq_nas_q"></summary><p data-t="faq_nas_a"></p></details>
+      <details><summary data-t="faq_where_q"></summary><p data-t="faq_where_a"></p></details>
+      <details><summary data-t="faq_safe_q"></summary><p data-t="faq_safe_a"></p></details>
+      <details><summary data-t="faq_pw_q"></summary><p data-t="faq_pw_a"></p></details>
+      <details><summary data-t="faq_cost_q"></summary><p data-t="faq_cost_a"></p></details>
+      <details><summary data-t="faq_browser_q"></summary><p data-t="faq_browser_a"></p></details>
+      <details><summary data-t="faq_bt_q"></summary><p data-t="faq_bt_a"></p></details>
+      <details><summary data-t="faq_help_q"></summary><p data-t="faq_help_a"></p></details>
+    </div>
+  </section>
 </main>
 
-<footer>
-  <p><span data-t="firmware"></span>: <span id="fw-version">–</span></p>
+<footer class="bottom">
+  <p data-t="made_for"></p>
   <p><a href="https://github.com/zeromips/fluestertuete" data-t="source"></a> ·
     <a href="mailto:fluestertuete@zeromips.org">fluestertuete@zeromips.org</a> ·
     <a href="impressum.html" data-t="imprint"></a> · <a href="datenschutz.html" data-t="privacy_page"></a></p>

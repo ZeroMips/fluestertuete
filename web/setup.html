@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flüstertüte einrichten</title>
+<link rel="icon" href="favicon.ico" sizes="48x48">
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="stylesheet" href="style.css">
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<header>
+  <div>
+    <a class="home-link" href="./">&larr; Flüstertüte</a>
+    <h1 data-t="title">Flüstertüte einrichten</h1>
+    <p class="tagline" data-t="tagline"></p>
+  </div>
+  <nav class="lang" aria-label="Sprache / Language">
+    <button type="button" data-lang="de">Deutsch</button>
+    <button type="button" data-lang="en">English</button>
+  </nav>
+</header>
+
+<main>
+  <p id="browser-missing" class="warn" data-t="browser_missing" hidden></p>
+  <p class="note" data-t="privacy"></p>
+
+  <form id="setup" autocomplete="off" novalidate>
+    <section>
+      <h2 data-t="s_device"></h2>
+      <fieldset class="choices" id="boards">
+        <legend data-t="board"></legend>
+        <!-- filled from firmware/index.json -->
+      </fieldset>
+      <label><span data-t="device_lang"></span>
+        <select id="lang"><option value="de">Deutsch</option><option value="en">English</option></select>
+      </label>
+    </section>
+
+    <section>
+      <h2 data-t="s_wifi"></h2>
+      <label><span data-t="wifi_ssid"></span><input id="wifi_ssid" required maxlength="32"></label>
+      <label><span data-t="wifi_password"></span><input id="wifi_password" type="password" maxlength="64"></label>
+    </section>
+
+    <section>
+      <h2 data-t="s_nas"></h2>
+      <fieldset class="choices">
+        <legend data-t="nas_type"></legend>
+        <label class="choice"><input type="radio" name="nas_type" value="synology" checked> <span data-t="type_synology"></span></label>
+        <label class="choice"><input type="radio" name="nas_type" value="webdav"> <span data-t="type_webdav"></span></label>
+      </fieldset>
+
+      <div data-nas="synology">
+        <p class="help" data-t="help_synology"></p>
+        <label><span data-t="share_link"></span><input id="share_link" required placeholder="https://…/sharing/…">
+          <small data-t="share_link_hint"></small></label>
+        <label><span data-t="share_password"></span><input id="share_password" type="password"></label>
+        <label><span data-t="nas_url"></span><input id="nas_url_synology" required placeholder="https://192.168.1.10:5001">
+          <small data-t="nas_url_hint"></small></label>
+      </div>
+
+      <div data-nas="webdav" hidden>
+        <p class="help" data-t="help_webdav"></p>
+        <label><span data-t="dav_url"></span><input id="nas_url_webdav" required placeholder="https://192.168.1.10:5006">
+          <small data-t="dav_url_hint"></small></label>
+        <label><span data-t="dav_user"></span><input id="dav_user"></label>
+        <label><span data-t="dav_password"></span><input id="dav_password" type="password"></label>
+      </div>
+
+      <label><span data-t="root"></span><input id="root" required placeholder="/Hörspiele">
+        <small id="root-hint"></small></label>
+
+      <details>
+        <summary data-t="advanced"></summary>
+        <label><span data-t="tls_name"></span><input id="tls_name"><small data-t="tls_name_hint"></small></label>
+        <label><span data-t="ca_pem"></span><textarea id="ca_pem" rows="4" spellcheck="false"></textarea>
+          <small data-t="ca_pem_hint"></small></label>
+        <label><span data-t="dlna_url"></span><input id="dlna_url"><small data-t="dlna_url_hint"></small></label>
+      </details>
+    </section>
+
+    <section>
+      <h2 data-t="s_extras"></h2>
+      <p class="help" data-t="extras_hint"></p>
+      <label><span data-t="ripper_url"></span><input id="ripper_url"><small data-t="ripper_url_hint"></small></label>
+      <label><span data-t="ripper_password"></span><input id="ripper_password" type="password"></label>
+      <label><span data-t="boombox_url"></span><input id="boombox_url"><small data-t="boombox_url_hint"></small></label>
+    </section>
+
+    <section>
+      <h2 data-t="s_flash"></h2>
+      <p class="help" data-t="flash_hint"></p>
+      <label class="choice"><input type="checkbox" id="erase_all"> <span data-t="erase_all"></span></label>
+      <div class="buttons">
+        <button type="button" id="install" class="primary" data-t="btn_install"></button>
+        <button type="button" id="settings-only" data-t="btn_settings_only"></button>
+      </div>
+      <div class="buttons small">
+        <button type="button" id="save" data-t="btn_save"></button>
+        <button type="button" id="load" data-t="btn_load"></button>
+        <input type="file" id="load-file" accept="application/json,.json" hidden>
+      </div>
+      <p class="help" data-t="save_hint"></p>
+      <details id="offline-box">
+        <summary data-t="offline"></summary>
+        <p class="help" data-t="offline_hint"></p>
+        <div class="buttons small"><button type="button" id="package" data-t="btn_package"></button></div>
+      </details>
+      <progress id="progress" max="100" value="0" hidden></progress>
+      <ul id="status" aria-live="polite"></ul>
+      <details id="raw-log-box" hidden><summary>Log</summary><pre id="raw-log"></pre></details>
+    </section>
+  </form>
+</main>
+
+<footer>
+  <p><span data-t="firmware"></span>: <span id="fw-version">–</span></p>
+  <p><a href="https://github.com/zeromips/fluestertuete" data-t="source"></a> ·
+    <a href="mailto:fluestertuete@zeromips.org">fluestertuete@zeromips.org</a> ·
+    <a href="impressum.html" data-t="imprint"></a> · <a href="datenschutz.html" data-t="privacy_page"></a></p>
+</footer>
+</body>
+</html>
