@@ -448,9 +448,21 @@ except cd.Cancelled:
             child = int((tmp / "child").read_text())
             p.terminate()
             self.assertEqual(p.wait(15), 42)
-            time.sleep(0.2)
-            with self.assertRaises(ProcessLookupError):
-                os.kill(child, 0)
+            self.assertTrue(gone(child), "cdparanoia (here: sleep) survived the cancel")
+
+
+def gone(pid, wait=5.0):
+    """True once pid has ended. A zombie counts: in a container, PID 1 may never collect it."""
+    end = time.time() + wait
+    while time.time() < end:
+        try:
+            state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+        except (OSError, IndexError):
+            return True
+        if state in ("Z", "X"):
+            return True
+        time.sleep(0.05)
+    return False
 
 
 if __name__ == "__main__":
