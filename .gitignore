@@ -10,5 +10,6 @@ backup/
 share.env
 ripper.env
 web/firmware/
+web/ripstation/
 local/
 __pycache__/

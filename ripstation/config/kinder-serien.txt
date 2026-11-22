@@ -1,0 +1,66 @@
+# Children's audio drama series. One entry per line; case-insensitive, whole-word match.
+#   Benjamin Blümchen        -> matches artist, album title or label
+#   artist: Conni            -> only the artist
+#   album: Pettersson        -> only the album title
+#   label: Kiddinx           -> only the label
+# '#' starts a comment. A match here files the disc under Hörspiele für Kinder (MP3 only).
+# The button on the Pi overrides everything (press it, then insert the disc).
+
+# --- Kiddinx / Karussell / Europa series ---
+Benjamin Blümchen
+Bibi Blocksberg
+Bibi & Tina
+Bibi und Tina
+Hanni und Nanni
+Die Playmos
+artist: Conni
+Meine Freundin Conni
+Pixi
+Der kleine Drache Kokosnuss
+Die Biene Maja
+Wickie
+Pumuckl
+Meister Eder und sein Pumuckl
+Käpt'n Sharky
+Lilli Lüftikus
+Kleiner Eisbär
+Räuber Hotzenplotz
+Der Räuber Hotzenplotz
+Das Sams
+Bob der Baumeister
+Feuerwehrmann Sam
+Peppa Wutz
+Paw Patrol
+Sendung mit der Maus
+Pettersson und Findus
+Ritter Rost
+Prinzessin Lillifee
+Leo Lausemaus
+Lauras Stern
+Die kleine Hexe
+Der kleine Wassermann
+Die Schlümpfe
+Fünf Freunde
+Hui Buh
+Die Olchis
+Die Chaosschwestern
+Die Star-Wars-Saga für Kinder erzählt
+Star Wars - The Clone Wars
+Clone Wars
+WAS IST WAS
+Lego Ninjago
+Ninjago
+label: Kiddinx
+label: Karussell
+label: Der Audio Verlag Kids
+label: Kiddinx Entertainment
+label: Universal Family Entertainment
+label: Jumbo Neue Medien
+
+# --- Borderline: uncomment what the family wants under Kinderhörspiele ---
+# Die drei ???
+# Die drei ??? Kids
+# TKKG
+# TKKG Junior
+# Die Punkerschnecken
+# label: Europa

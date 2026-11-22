@@ -21,6 +21,16 @@ print("config vector ok (python)")
 P
 if command -v node >/dev/null; then node tests/config_vector.mjs; fi
 
+# CD ripping station: its own tests, and the card files the website writes (YAML, cloud-init schema).
+for t in ripstation/tests/test_*.py; do
+    out=$(python3 -I "$t" 2>&1) || { echo "$out"; echo "FAILED: $t"; exit 1; }
+    echo "$t: ${out##*$'\n'}"
+done
+if command -v node >/dev/null; then
+    rm -rf $B/card && mkdir -p $B/card
+    node tests/ripstation_files.mjs $B/card && python3 tests/ripstation_check.py $B/card
+fi
+
 # Search over a real library listing, when one is given: LIBRARY_LISTING=files.jsonl LIBRARY_PREFIX=/volume1/music
 # LIBRARY_ROOT="/Hörspiele für Kinder" (JSON lines with "path" and "size"; see tests/make_index.py).
 FILES=${LIBRARY_LISTING:-}

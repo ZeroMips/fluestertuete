@@ -1,0 +1,16 @@
+[Unit]
+Description=CD ripper: albums on the Bluetooth speaker (remote-controlled by the Flüstertüte)
+After=network.target bluetooth.service bluealsa.service
+Wants=bluealsa.service
+
+[Service]
+User=ripper
+Group=ripper
+SupplementaryGroups=audio bluetooth
+Environment=LANG=C.UTF-8
+ExecStart=/usr/local/bin/cd-bt
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

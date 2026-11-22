@@ -1,0 +1,16 @@
+[Unit]
+Description=CD ripper OLED status display and kids button
+After=local-fs.target
+
+[Service]
+User=ripper
+Group=ripper
+SupplementaryGroups=i2c gpio
+WorkingDirectory=/run/cd-ripper
+Environment=LANG=C.UTF-8
+ExecStart=/usr/local/bin/cd-ui
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

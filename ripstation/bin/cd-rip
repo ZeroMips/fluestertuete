@@ -1,0 +1,1123 @@
+#!/usr/bin/env python3
+"""cd-rip: rip an inserted audio CD, tag + classify it, deliver it to the NAS, eject.
+
+Pipeline: libdiscid -> MusicBrainz lookup (GnuDB as fallback) -> classify -> xmcd cache for abcde -> abcde
+(cdparanoia + flac/lame) -> retag with mutagen (+ cover art) -> copy to NAS -> eject.
+Run by systemd (cd-rip@sr0.service, started from udev). `cd-rip --flush` retries
+deliveries that could not reach the NAS earlier.
+"""
+import argparse
+import ctypes
+import fcntl
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
+from difflib import SequenceMatcher
+from pathlib import Path
+
+VERSION = "1.0"
+RUN_DIR = Path(os.environ.get("CDRIP_RUN_DIR", "/run/cd-ripper"))
+
+DEFAULTS = {
+    "STATE_DIR": "/var/lib/cd-ripper",
+    "SERIES_FILE": "/etc/cd-ripper/kinder-serien.txt",
+    "ABCDE_CONF": "/etc/cd-ripper/abcde.conf",
+    "DISCOGS_TOKEN": "",
+    # MusicBrainz asks for a contact in the User-Agent: the project page by default.
+    "MB_CONTACT": "https://fluestertuete.zeromips.org",
+    "GNUDB_CONTACT": "",
+    "GNUDB_URL": "https://gnudb.gnudb.org/~cddb/cddb.cgi",
+    # Application name GnuDB knows us by (hello string + User-Agent). No spaces. Must be the name registered with GnuDB.
+    "GNUDB_APP": "fluestertuete-ripstation",
+    "MOUNT_POINTS": "/mnt/nas",
+    "FORMATS_DEFAULT": "mp3 flac",
+    # Library check before ripping: folders searched (Artist/Album, up to 3 levels deep) for the album.
+    # LIBRARY_CHECK=0 turns it off.
+    "LIBRARY_CHECK": "1",
+    "LIBRARY_ROOTS": "/mnt/nas",
+    # DEST_<CLASS>_<FORMAT>: where finished albums of that class/format go. A class is
+    # ripped in exactly the formats that have a DEST entry. Class: MUSIC KIDS SPOKEN UNSORTED
+    # The NAS share is mounted at /mnt/nas (see install.sh); MP3 only unless FLAC lines are added.
+    "DEST_MUSIC_MP3": "/mnt/nas/Musik",
+    "DEST_KIDS_MP3": "/mnt/nas/Hörspiele",
+    "DEST_SPOKEN_MP3": "/mnt/nas/Hörbücher",
+    "DEST_UNSORTED_MP3": "/mnt/nas/Unsortiert",
+}
+CLASS_LABEL = {"MUSIC": "Musik", "KIDS": "Kinderhörspiel", "SPOKEN": "Hörbuch", "UNSORTED": "Unsortiert"}
+
+
+def log(msg):
+    print(msg, file=sys.stderr, flush=True)
+
+
+# --------------------------------------------------------------------------- config
+
+def load_config(path):
+    cfg = dict(DEFAULTS)
+    try:
+        for line in Path(path).read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            cfg[key.strip()] = value
+    except FileNotFoundError:
+        log(f"config {path} not found, using defaults")
+    return cfg
+
+
+def formats_for(cfg, cls):
+    out = []
+    for fmt in ("mp3", "flac"):
+        if cfg.get(f"DEST_{cls}_{fmt.upper()}"):
+            out.append(fmt)
+    return out
+
+
+# --------------------------------------------------------------------------- cancel
+
+class Cancelled(BaseException):
+    """SIGTERM while a disc is read or ripped: cd-web's "Cancel" button or systemctl stop."""
+
+
+def _on_term(signum, frame):
+    raise Cancelled()
+
+
+# --------------------------------------------------------------------------- status (for the OLED)
+
+class Status:
+    def __init__(self):
+        self.data = {"state": "idle"}
+
+    def set(self, state, **kw):
+        self.data = {"state": state, "ts": time.time(), **kw}
+        try:
+            RUN_DIR.mkdir(parents=True, exist_ok=True)
+            tmp = RUN_DIR / "status.json.tmp"
+            tmp.write_text(json.dumps(self.data, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, RUN_DIR / "status.json")
+        except OSError as e:
+            log(f"status write failed: {e}")
+
+    def update(self, **kw):
+        self.set(self.data.get("state", "idle"), **{**{k: v for k, v in self.data.items()
+                                                       if k not in ("state", "ts")}, **kw})
+
+
+# --------------------------------------------------------------------------- disc id
+
+class Disc:
+    def __init__(self, mb_id, toc, first, last, cddb_id):
+        self.mb_id, self.toc, self.first, self.last, self.cddb_id = mb_id, toc, first, last, cddb_id
+
+    @property
+    def ntracks(self):
+        return self.last - self.first + 1
+
+
+def read_disc(device):
+    lib = ctypes.CDLL("libdiscid.so.0")
+    lib.discid_new.restype = ctypes.c_void_p
+    for fn in ("discid_get_id", "discid_get_toc_string", "discid_get_error_msg"):
+        getattr(lib, fn).restype = ctypes.c_char_p
+        getattr(lib, fn).argtypes = [ctypes.c_void_p]
+    lib.discid_read_sparse.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint]
+    for fn in ("discid_get_first_track_num", "discid_get_last_track_num"):
+        getattr(lib, fn).argtypes = [ctypes.c_void_p]
+    lib.discid_free.argtypes = [ctypes.c_void_p]
+    d = lib.discid_new()
+    try:
+        if not lib.discid_read_sparse(d, device.encode(), 0):
+            raise RuntimeError(lib.discid_get_error_msg(d).decode())
+        mb_id = lib.discid_get_id(d).decode()
+        toc = lib.discid_get_toc_string(d).decode()
+        first, last = lib.discid_get_first_track_num(d), lib.discid_get_last_track_num(d)
+    finally:
+        lib.discid_free(d)
+    out = subprocess.run(["cd-discid", device], capture_output=True, text=True, check=True).stdout
+    return Disc(mb_id, toc, first, last, out.split()[0])
+
+
+# --------------------------------------------------------------------------- MusicBrainz / Discogs
+
+def http_json(url, ua, tries=3, wait=2):
+    last = None
+    for i in range(tries):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": ua, "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            if e.code in (404, 400):
+                return None
+            last = e
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            last = e
+        time.sleep(wait * (i + 1))
+    raise RuntimeError(f"request failed: {url}: {last}")
+
+
+def credit_name(ac):
+    """Join an artist-credit list into 'A feat. B' style text."""
+    return "".join((c.get("name") or c.get("artist", {}).get("name", "")) + c.get("joinphrase", "")
+                   for c in ac or []).strip()
+
+
+def parse_release(rel, mb_disc_id, ntracks, media_total=None):
+    """Reduce a MusicBrainz release JSON to what we need. Pure function (unit tested)."""
+    media = rel.get("media", [])
+    medium = next((m for m in media if any(d.get("id") == mb_disc_id for d in m.get("discs", []))), None)
+    if medium is None:  # disc id not attached to the release (manual --release): match by track count
+        medium = next((m for m in media if len(m.get("tracks", [])) == ntracks), media[0] if media else {})
+    tracks = []
+    for t in medium.get("tracks", []):
+        tracks.append({"title": t.get("title", ""), "artist": credit_name(t.get("artist-credit"))})
+    if len(tracks) != ntracks:
+        tracks = []
+    rg = rel.get("release-group", {})
+    labels = [li["label"]["name"] for li in rel.get("label-info", []) if li.get("label")]
+    total = media_total or len(media) or 1
+    return {
+        "mbid": rel.get("id", ""),
+        "artist": credit_name(rel.get("artist-credit")),
+        "album": rel.get("title", ""),
+        "year": (rel.get("date") or "")[:4],
+        "labels": labels,
+        "types": [t.lower() for t in [rg.get("primary-type") or ""] + rg.get("secondary-types", []) if t],
+        "disc_no": medium.get("position", 1),
+        "disc_total": total,
+        "tracks": tracks,
+        "has_cover": bool(rel.get("cover-art-archive", {}).get("front")),
+    }
+
+
+MB_INC = "artist-credits+labels+release-groups+recordings"
+
+
+def toc_lengths(toc):
+    """Track lengths in seconds from a libdiscid TOC string: 'first last leadout off1 off2 ...'."""
+    nums = [int(x) for x in toc.split()]
+    leadout, offsets = nums[2], nums[3:]
+    bounds = offsets + [leadout]
+    return [(bounds[i + 1] - bounds[i]) / 75 for i in range(len(offsets))]
+
+
+def best_fuzzy(releases, disc, tolerance=3.0):
+    """Pick the release whose track lengths match the disc, or None if none/several distinct ones do.
+
+    MusicBrainz disc ids are very pressing-specific; the same album is often only registered for
+    another pressing (or not at all). Matching every single track length makes a wrong hit very unlikely."""
+    ours = toc_lengths(disc.toc)
+    scored = []
+    for rel in releases:
+        for medium in rel.get("media", []):
+            tracks = medium.get("tracks", [])
+            if len(tracks) != len(ours) or any(not t.get("length") for t in tracks):
+                continue
+            diff = max(abs(t["length"] / 1000 - o) for t, o in zip(tracks, ours))
+            if diff <= tolerance:
+                scored.append((diff, rel))
+            break
+    if not scored:
+        return None
+    scored.sort(key=lambda x: x[0])
+    distinct = {(credit_name(r.get("artist-credit")).casefold(), r.get("title", "").casefold()) for _, r in scored}
+    if len(distinct) > 1:
+        log("fuzzy match ambiguous: " + "; ".join(f"{credit_name(r.get('artist-credit'))} - {r.get('title')}"
+                                                  for _, r in scored))
+        return None
+    return scored[0][1]
+
+
+def attach_link(disc):
+    return "https://musicbrainz.org/cdtoc/attach?toc=" + disc.toc.replace(" ", "+")
+
+
+def musicbrainz_lookup(disc, ua):
+    """Exact disc-id lookup first, then a verified fuzzy lookup by track lengths."""
+    data = http_json(f"https://musicbrainz.org/ws/2/discid/{disc.mb_id}?inc={MB_INC}&fmt=json", ua, tries=5, wait=4)
+    releases = (data or {}).get("releases") or []
+    match = "exact"
+    if not releases:
+        time.sleep(1.1)
+        data = http_json(f"https://musicbrainz.org/ws/2/discid/-?toc={disc.toc.replace(' ', '+')}"
+                         f"&cdstubs=no&inc={MB_INC}&fmt=json", ua, tries=5, wait=4)
+        rel = best_fuzzy((data or {}).get("releases") or [], disc)
+        if not rel:
+            return None
+        releases, match = [rel], "fuzzy"
+    releases.sort(key=lambda r: (not r.get("cover-art-archive", {}).get("front"), r.get("date") or "9999"))
+    rel = releases[0]
+    total = None
+    time.sleep(1.1)  # MusicBrainz rate limit: 1 request/second
+    try:
+        full = http_json(f"https://musicbrainz.org/ws/2/release/{rel['id']}?inc=media&fmt=json", ua)
+        total = len((full or {}).get("media", [])) or None
+    except RuntimeError:
+        pass
+    info = parse_release(rel, disc.mb_id, disc.ntracks, total)
+    info["match"] = match
+    return info
+
+
+def musicbrainz_release(mbid, disc_id, ntracks, ua):
+    """Look a release up by its MusicBrainz id (manual override for discs MusicBrainz does not know)."""
+    inc = "artist-credits+labels+release-groups+recordings+media"
+    rel = http_json(f"https://musicbrainz.org/ws/2/release/{mbid}?inc={inc}&fmt=json", ua)
+    if not rel:
+        raise RuntimeError(f"release {mbid} not found")
+    return parse_release(rel, disc_id, ntracks)
+
+
+# --------------------------------------------------------------------------- GnuDB (CDDB)
+
+SPOKEN_WORDS = ("hörspiel", "horspiel", "hörbuch", "audiobook", "audio drama", "spoken", "speech", "lesung")
+KIDS_WORDS = ("kinder", "children", "kids")
+
+
+def cddb_query_args(disc):
+    """'discid ntracks off1 ... offN seconds' as the CDDB query command wants it."""
+    nums = [int(x) for x in disc.toc.split()]
+    leadout, offsets = nums[2], nums[3:]
+    return [disc.cddb_id, str(len(offsets))] + [str(o) for o in offsets] + [str(leadout // 75)]
+
+
+def parse_cddb_query(text):
+    """(category, discid) candidates from a query reply; exact (200/210) and inexact (211) alike,
+    since every candidate is checked against the track lengths afterwards."""
+    lines = text.replace("\r", "").split("\n")
+    head = lines[0].split(" ", 3) if lines else []
+    if not head or head[0] not in ("200", "210", "211"):
+        return []
+    if head[0] == "200":
+        return [(head[1], head[2])] if len(head) >= 3 else []
+    out = []
+    for line in lines[1:]:
+        if line.strip() == ".":
+            break
+        p = line.split(" ", 2)
+        if len(p) >= 2:
+            out.append((p[0], p[1]))
+    return out
+
+
+def parse_xmcd(text):
+    """Fields (repeated keys concatenated), the frame offsets and the disc length in seconds (or None)
+    from an xmcd entry."""
+    fields, offsets, in_offsets, length = {}, [], False, None
+    for line in text.replace("\r", "").split("\n"):
+        if line.startswith("#"):
+            body = line[1:].strip()
+            if body.lower().startswith("track frame offsets"):
+                in_offsets = True
+            elif in_offsets and body.isdigit():
+                offsets.append(int(body))
+            elif in_offsets and offsets:
+                in_offsets = False
+            m = re.match(r"(?i)disc length:\s*(\d+)", body)
+            if m:
+                length = int(m.group(1))
+            continue
+        if "=" in line:
+            k, v = line.split("=", 1)
+            fields[k] = fields.get(k, "") + v
+    return fields, offsets, length
+
+
+def gnudb_info(fields, offsets, length, disc, tolerance=3.0):
+    """Reduce an xmcd entry to the same shape as parse_release, or None if its track lengths do not
+    match the disc (CDDB ids collide often, and inexact matches are only accepted when verified)."""
+    ours = toc_lengths(disc.toc)
+    if len(offsets) != len(ours):
+        return None
+    # xmcd gives the disc length only in whole seconds: good enough with the tolerance
+    bounds = offsets + [length * 75 if length else int(disc.toc.split()[2])]
+    theirs = [(bounds[i + 1] - bounds[i]) / 75 for i in range(len(offsets))]
+    if any(abs(a - b) > tolerance for a, b in zip(theirs, ours)):
+        return None
+    title = one_line(fields.get("DTITLE", ""))
+    artist, sep, album = title.partition(" / ")
+    if not sep:
+        artist = album = title
+    if not album:
+        return None
+    tracks = []
+    for i in range(len(ours)):
+        t = one_line(fields.get(f"TTITLE{i}", ""))
+        tr_artist, sep, tr_title = t.partition(" / ")
+        tracks.append({"title": tr_title, "artist": tr_artist} if sep else {"title": t, "artist": ""})
+    genre = one_line(fields.get("DGENRE", "")).casefold()
+    types = []
+    if any(w in genre for w in KIDS_WORDS):
+        types.append("children")
+    if any(w in genre for w in SPOKEN_WORDS):
+        types.append("audio drama")
+    year = one_line(fields.get("DYEAR", ""))
+    return {"mbid": "", "artist": artist, "album": album, "year": year if re.fullmatch(r"\d{4}", year) else "",
+            "labels": [], "types": types, "disc_no": 1, "disc_total": 1, "tracks": tracks, "has_cover": False,
+            "match": "gnudb"}
+
+
+def cddb_get(url, cmd, contact, ua, app="cd-ripper"):
+    user, _, host = contact.partition("@")
+    hello = "+".join(urllib.parse.quote(x) for x in (user, host or "localhost", app, "v" + VERSION))  # gnudb.org/howto.php: ...+applicationname+v0.1
+    req = urllib.request.Request(f"{url}?cmd={cmd}&hello={hello}&proto=6", headers={"User-Agent": f"{app}/{VERSION}"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        raw = r.read()
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("latin-1")
+
+
+def gnudb_lookup(disc, cfg, ua):
+    """GnuDB knows many German audio dramas MusicBrainz does not. Needs GNUDB_CONTACT (an e-mail address;
+    GnuDB refuses anonymous requests)."""
+    contact = cfg.get("GNUDB_CONTACT", "")
+    if not contact:
+        return None
+    try:
+        reply = cddb_get(cfg["GNUDB_URL"], "cddb+query+" + "+".join(cddb_query_args(disc)), contact, ua, cfg["GNUDB_APP"])
+        candidates = parse_cddb_query(reply)
+        if not candidates:
+            log(f"gnudb: {reply.splitlines()[0] if reply else 'empty reply'}")
+            return None
+        for cat, discid in candidates[:5]:
+            entry = cddb_get(cfg["GNUDB_URL"], f"cddb+read+{cat}+{discid}", contact, ua, cfg["GNUDB_APP"])
+            if not entry.startswith("210"):
+                continue
+            info = gnudb_info(*parse_xmcd(entry), disc)
+            if info:
+                log(f"gnudb: {cat}/{discid}: {info['artist']} - {info['album']}")
+                return info
+        log("gnudb: no entry with matching track lengths")
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        log(f"gnudb: {e}")
+    return None
+
+
+def discogs_is_kids(token, artist, album, ua):
+    """Secondary signal: Discogs genre 'Children's' + style 'Story'."""
+    if not token:
+        return None
+    q = urllib.parse.urlencode({"artist": artist, "release_title": album, "type": "release",
+                                "per_page": 5, "token": token})
+    try:
+        data = http_json(f"https://api.discogs.com/database/search?{q}", ua, tries=2)
+    except RuntimeError as e:
+        log(f"discogs: {e}")
+        return None
+    for res in (data or {}).get("results", []):
+        genres = [g.lower() for g in res.get("genre", [])]
+        styles = [s.lower() for s in res.get("style", [])]
+        if "children's" in genres and "story" in styles:
+            return f"Discogs: {res.get('title', '?')}"
+    return None
+
+
+# --------------------------------------------------------------------------- classification
+
+def load_series(path):
+    """kinder-serien.txt: 'name' (artist/album/label), or 'artist:|album:|label: name'."""
+    rules = []
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        log(f"series file {path} not found")
+        return rules
+    for line in lines:
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        field = "any"
+        m = re.match(r"(artist|album|label)\s*:\s*(.+)", line, re.I)
+        if m:
+            field, line = m.group(1).lower(), m.group(2).strip()
+        rules.append((field, re.compile(r"(?<!\w)" + re.escape(line.casefold()) + r"(?!\w)"), line))
+    return rules
+
+
+def match_series(rules, info):
+    fields = {"artist": [info["artist"]], "album": [info["album"]], "label": info["labels"]}
+    fields["any"] = fields["artist"] + fields["album"] + fields["label"]
+    for field, rx, name in rules:
+        for text in fields[field]:
+            if rx.search(text.casefold()):
+                return f"Serienliste: {name} ({field})"
+    return None
+
+
+def classify(info, kids_flag, rules, discogs_token="", ua="cd-ripper"):
+    """Return (class, reason). Order follows the project brief."""
+    if kids_flag:
+        cls = kids_flag if isinstance(kids_flag, str) else "KIDS"
+        return cls, "von Hand gewählt"
+    if not info:
+        return "UNSORTED", "keine Metadaten"
+    hit = match_series(rules, info)
+    if hit:
+        return "KIDS", hit
+    types = info["types"]
+    if "children" in types:  # GnuDB genre such as "Kinderhörspiel"
+        return "KIDS", "GnuDB: Genre"
+    spoken = any(t in types for t in ("audiobook", "audio drama", "spokenword"))
+    if spoken:
+        hit = discogs_is_kids(discogs_token, info["artist"], info["album"], ua)
+        if hit:
+            return "KIDS", hit
+        if "audiobook" in types:
+            return "SPOKEN", "MusicBrainz: Audiobook"
+        return "UNSORTED", "Hörspiel ohne Kinder-Signal"
+    return "MUSIC", "MusicBrainz: Musik"
+
+
+SOURCE_LABEL = {"exact": "MusicBrainz (Disc-ID)", "fuzzy": "MusicBrainz (Tracklängen)", "gnudb": "GnuDB",
+                "release": "MusicBrainz (von Hand)"}
+
+
+def detection(info, cls, reason, fmts, cfg, hint=""):
+    """What auto-detection decided, for the web page. 'choices' = classes that the formats being ripped can
+    still serve (a class needing FLAC cannot be chosen once only MP3 is ripped)."""
+    choices = [c for c in CLASS_LABEL if formats_for(cfg, c) and set(formats_for(cfg, c)) <= set(fmts)]
+    return {"source": SOURCE_LABEL.get((info or {}).get("match", ""), "nichts gefunden") if info else "nichts gefunden",
+            "reason": reason, "year": (info or {}).get("year", ""),
+            "dests": [{"fmt": f, "path": cfg[f"DEST_{cls}_{f.upper()}"]} for f in fmts], "choices": choices,
+            "hint": hint}
+
+
+def take_correction(run_dir=None):
+    """The operator's correction from the web page ({"cls": ..., "release": MBID}), consumed once."""
+    path = (run_dir or RUN_DIR) / "correction"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    path.unlink(missing_ok=True)
+    return data if isinstance(data, dict) else {}
+
+
+# --------------------------------------------------------------------------- library check
+
+AUDIO_EXT = {".mp3", ".flac", ".m4a", ".ogg", ".opus", ".wma", ".wav"}
+SKIP_DIRS = {"@eadir", "#recycle", "@recycle", "#snapshot"}
+
+
+def norm_name(s):
+    """Folder/album name reduced for comparing: no case, accents, punctuation, disc/year decorations."""
+    s = unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode().casefold().replace("&", " and ")
+    s = re.sub(r"[\(\[]\s*(disc|cd|disk)\s*\d+\s*[\)\]]", " ", s)
+    s = re.sub(r"^\s*\(?\d{4}\)?\s*[-.]?\s+", "", s)
+    s = re.sub(r"[^a-z0-9]+", " ", s).strip()
+    return re.sub(r"^(the|der|die|das) ", "", s)
+
+
+def names_match(a, b):
+    a, b = norm_name(a), norm_name(b)
+    return bool(a) and bool(b) and (a == b or SequenceMatcher(None, a, b).ratio() >= 0.93)
+
+
+def count_audio(path):
+    n = 0
+    for _, _, files in os.walk(path):
+        n += sum(1 for f in files if os.path.splitext(f)[1].lower() in AUDIO_EXT)
+    return n
+
+
+def subdirs(path):
+    try:
+        with os.scandir(path) as it:
+            return sorted((e.path, e.name) for e in it
+                          if e.name.casefold() not in SKIP_DIRS and e.is_dir(follow_symlinks=False))
+    except OSError:
+        return []
+
+
+def find_in_library(roots, artist, album, ntracks, budget=45.0):
+    """Look for artist/album in the library. Returns {"path", "tracks", "same"} or None.
+    `same` = identical number of audio files (otherwise another edition: reported, but still ripped).
+    Layouts accepted: <root>/<Artist>/<Album>, <root>/<Genre>/<Artist>/<Album>, <root>/<Artist - Album>."""
+    various = re.match(r"(?i)various|diverse|sampler", artist or "") is not None
+    flat = norm_name(f"{artist} {album}")
+    deadline = time.time() + budget
+    roots = [str(Path(r)) for r in roots]
+    best = None
+    for root in roots:
+        stack = [(root, [], 0)]  # directory, names above it below root, depth
+        while stack:
+            path, above, depth = stack.pop()
+            if time.time() > deadline:
+                log("library check: time budget used up")
+                return best
+            for sub, name in subdirs(path):
+                if sub in roots:  # searched on its own
+                    continue
+                hit = (names_match(name, album) and (various or any(names_match(a, artist) for a in above))) \
+                    or (not various and norm_name(name) == flat)
+                if hit:
+                    n = count_audio(sub)
+                    if n:
+                        found = {"path": sub, "tracks": n, "same": n == ntracks}
+                        if found["same"]:
+                            return found
+                        best = best or found
+                if depth < 2:
+                    stack.append((sub, above + [name], depth + 1))
+    return best
+
+
+# --------------------------------------------------------------------------- abcde cache
+
+def one_line(s):
+    return re.sub(r"\s+", " ", s or "").strip()
+
+
+def build_xmcd(disc, info, now=None):
+    """CDDB (xmcd) file in abcde's local cache; lets abcde use our MusicBrainz data."""
+    now = now or time.strftime("%Y-%m-%d %H:%M")
+    n = disc.ntracks
+    lines = ["# xmcd", "#", f"# Generated by cd-rip {VERSION}", "#", f"DISCID={disc.cddb_id}"]
+    if info:
+        va = re.match(r"(?i)various|diverse", info["artist"]) is not None
+        artist = "Various Artists" if va else info["artist"]
+        album = info["album"]
+        if info["disc_total"] > 1:
+            album += f" (Disc {info['disc_no']})"
+        lines.append(f"DTITLE={one_line(artist)} / {one_line(album)}")
+        lines.append(f"DYEAR={info['year']}")
+        lines.append("DGENRE=" + ("Speech" if any(t in info["types"] for t in
+                                                   ("audiobook", "audio drama", "spokenword")) else ""))
+        for i in range(n):
+            t = info["tracks"][i] if info["tracks"] else {"title": f"Track {i + 1:02d}", "artist": ""}
+            title = one_line(t["title"]) or f"Track {i + 1:02d}"
+            if va and t["artist"]:
+                title = f"{one_line(t['artist'])} / {title}"
+            lines.append(f"TTITLE{i}={title}")
+    else:
+        lines += [f"DTITLE=Unbekannt / Disc {now}", "DYEAR=", "DGENRE="]
+        lines += [f"TTITLE{i}=Track {i + 1:02d}" for i in range(n)]
+    lines += ["EXTD=", *[f"EXTT{i}=" for i in range(n)], "PLAYORDER="]
+    return "\n".join(lines) + "\n"
+
+
+# --------------------------------------------------------------------------- ripping
+
+def rip(device, jobdir, fmts, disc, status, cfg, base):
+    env = dict(os.environ, CDRIP_JOBDIR=str(jobdir), CDRIP_CDDB_DIR=str(Path(cfg["STATE_DIR"]) / "cddb"))
+    cmd = ["abcde", "-N", "-L", "-c", cfg["ABCDE_CONF"], "-d", device, "-o", ",".join(fmts)]
+    log("running: " + " ".join(cmd))
+    total = disc.ntracks * (1 + len(fmts))
+    stop = threading.Event()
+
+    def watch():
+        while not stop.wait(2):
+            done = 0
+            for st in (jobdir / "wav").glob("abcde.*/status"):
+                try:
+                    txt = st.read_text(errors="replace")
+                except OSError:
+                    continue
+                done += len(re.findall(r"^(readtrack|encodetrack)-", txt, re.M))
+            status.update(progress=min(done / total, 0.99), **base)
+
+    t = threading.Thread(target=watch, daemon=True)
+    t.start()
+    # Own process group: a cancel stops abcde together with its cdparanoia and lame.
+    with open(jobdir / "abcde.log", "wb") as lf:
+        p = subprocess.Popen(cmd, env=env, stdout=lf, stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            rc = p.wait()
+        except BaseException:
+            try:
+                os.killpg(p.pid, signal.SIGTERM)
+                p.wait(10)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            raise
+        finally:
+            stop.set()
+            t.join()
+    return rc
+
+
+def safe_name(name):
+    name = re.sub(r'[:"*?<>|]', "", name or "")
+    name = name.replace("/", " -")
+    name = re.sub(r"\s+", " ", name).strip().lstrip(".").strip()
+    return name or "_"
+
+
+def relabel_job(jobdir, info, cls, cfg, ua):
+    """Re-name, re-tag and re-class an already ripped job from MusicBrainz data (no new rip)."""
+    meta = json.loads((jobdir / "meta.json").read_text(encoding="utf-8"))
+    fmts = formats_for(cfg, cls)
+    va = re.match(r"(?i)various|diverse", info["artist"]) is not None
+    artist_dir = "Various Artists" if va else safe_name(info["artist"])
+    album = info["album"] + (f" (Disc {info['disc_no']})" if info["disc_total"] > 1 else "")
+    cover = fetch_cover(info, jobdir / "cover.jpg", ua)
+    for fmt in ("mp3", "flac"):
+        old = find_albums(jobdir, fmt)
+        if fmt not in fmts:
+            shutil.rmtree(jobdir / "out" / fmt, ignore_errors=True)
+            continue
+        if len(old) != 1:
+            raise RuntimeError(f"expected one {fmt} album in {jobdir}")
+        files = sorted(old[0].glob(f"*.{fmt}"))
+        new_dir = jobdir / "out" / fmt / ".new" / artist_dir / safe_name(album)
+        new_dir.mkdir(parents=True)
+        for f in files:
+            n = int(re.match(r"(\d+)", f.name).group(1))
+            t = info["tracks"][n - 1] if len(info["tracks"]) >= n else {"title": f"Track {n:02d}", "artist": ""}
+            title = f"{t['artist']} - {t['title']}" if va and t["artist"] else t["title"]
+            shutil.move(f, new_dir / f"{n:02d} - {safe_name(title)}.{fmt}")
+        retag(new_dir, fmt, info, None, cover)
+        if cover:
+            shutil.copy(cover, new_dir / "cover.jpg")
+        for child in (jobdir / "out" / fmt).iterdir():
+            if child.name != ".new":
+                shutil.rmtree(child)
+        for child in (jobdir / "out" / fmt / ".new").iterdir():
+            shutil.move(child, jobdir / "out" / fmt / child.name)
+        (jobdir / "out" / fmt / ".new").rmdir()
+    meta.update(cls=cls, artist=info["artist"], album=info["album"],
+                dests={fmt: cfg[f"DEST_{cls}_{fmt.upper()}"] for fmt in fmts})
+    meta["delivered"], meta["final"] = [], []
+    (jobdir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+
+
+def find_albums(jobdir, fmt):
+    """Album directories (those that directly contain audio files) below out/<fmt>/."""
+    root = jobdir / "out" / fmt
+    return sorted({p.parent for p in root.rglob(f"*.{fmt}")})
+
+
+def retag(album_dir, fmt, info, disc, cover):
+    """Write clean tags (UTF-16 ID3v2.3 for mp3, Vorbis comments for flac) from MusicBrainz data."""
+    import mutagen
+    from mutagen.flac import FLAC, Picture
+    from mutagen.id3 import ID3, APIC, TALB, TPE1, TPE2, TIT2, TRCK, TPOS, TDRC, TCON
+    files = sorted(album_dir.glob(f"*.{fmt}"))
+    jpeg = cover.read_bytes() if cover and cover.exists() else None
+    for f in files:
+        m = re.match(r"(\d+)", f.name)
+        if not m:
+            continue
+        n = int(m.group(1))
+        t = info["tracks"][n - 1] if info and len(info["tracks"]) >= n else None
+        if not info:
+            continue
+        album = info["album"] + (f" (Disc {info['disc_no']})" if info["disc_total"] > 1 else "")
+        title = t["title"] if t else f"Track {n:02d}"
+        artist = (t["artist"] if t and t["artist"] else info["artist"])
+        if fmt == "mp3":
+            try:
+                ID3(f).delete(f)
+            except mutagen.id3.ID3NoHeaderError:
+                pass
+            tags = ID3()
+            tags.add(TIT2(encoding=1, text=title))
+            tags.add(TPE1(encoding=1, text=artist))
+            tags.add(TPE2(encoding=1, text=info["artist"]))
+            tags.add(TALB(encoding=1, text=album))
+            tags.add(TRCK(encoding=1, text=f"{n}/{len(files)}"))
+            if info["disc_total"] > 1:
+                tags.add(TPOS(encoding=1, text=f"{info['disc_no']}/{info['disc_total']}"))
+            if info["year"]:
+                tags.add(TDRC(encoding=1, text=info["year"]))
+            if any(x in info["types"] for x in ("audiobook", "audio drama", "spokenword")):
+                tags.add(TCON(encoding=1, text="Speech"))
+            if jpeg:
+                tags.add(APIC(encoding=1, mime="image/jpeg", type=3, desc="Cover", data=jpeg))
+            tags.save(f, v2_version=3)
+        else:
+            fl = FLAC(f)
+            fl.delete()
+            fl.clear_pictures()
+            fl["title"], fl["artist"], fl["albumartist"], fl["album"] = [title], [artist], [info["artist"]], [album]
+            fl["tracknumber"], fl["tracktotal"] = [str(n)], [str(len(files))]
+            if info["disc_total"] > 1:
+                fl["discnumber"], fl["disctotal"] = [str(info["disc_no"])], [str(info["disc_total"])]
+            if info["year"]:
+                fl["date"] = [info["year"]]
+            if info["mbid"]:
+                fl["musicbrainz_albumid"] = [info["mbid"]]
+            if jpeg:
+                pic = Picture()
+                pic.type, pic.mime, pic.data = 3, "image/jpeg", jpeg
+                fl.add_picture(pic)
+            fl.save()
+
+
+def fetch_cover(info, dest, ua):
+    if not info or not info["mbid"] or not info["has_cover"]:
+        return None
+    try:
+        req = urllib.request.Request(f"https://coverartarchive.org/release/{info['mbid']}/front-500",
+                                     headers={"User-Agent": ua})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            dest.write_bytes(r.read())
+        return dest
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        log(f"cover art: {e}")
+        return None
+
+
+# --------------------------------------------------------------------------- delivery
+
+def mount_fstype(mp):
+    """Filesystem type of the topmost mount at `mp` (e.g. 'nfs4'), or None if nothing is mounted there."""
+    fstype = None
+    try:
+        for line in Path("/proc/self/mounts").read_text(encoding="utf-8", errors="replace").splitlines():
+            parts = line.split()
+            if len(parts) > 2 and parts[1] == mp:
+                fstype = parts[2]
+    except OSError:
+        pass
+    return fstype
+
+
+def mounts_ready(cfg, dests):
+    """True if every NAS mount point needed for `dests` is really mounted.
+
+    A systemd automount point always 'exists' (fstype autofs) even when the NFS mount behind it fails."""
+    ok = True
+    for mp in cfg["MOUNT_POINTS"].split():
+        if not any(str(d).startswith(mp) for d in dests):
+            continue
+        try:
+            os.listdir(mp)  # triggers systemd automount
+        except OSError:
+            pass
+        if mount_fstype(mp) in (None, "autofs"):
+            log(f"{mp} is not mounted")
+            ok = False
+    return ok
+
+
+def unique_target(path):
+    if not path.exists():
+        return path
+    for i in range(2, 100):
+        cand = path.with_name(f"{path.name} ({i})")
+        if not cand.exists():
+            return cand
+    raise RuntimeError(f"no free name for {path}")
+
+
+def deliver_job(jobdir, cfg):
+    """Copy a finished job to the NAS. Returns list of final directories; raises if NAS unavailable."""
+    meta = json.loads((jobdir / "meta.json").read_text(encoding="utf-8"))
+    dests = {fmt: Path(d) for fmt, d in meta["dests"].items()}
+    if not mounts_ready(cfg, dests.values()):
+        raise RuntimeError("NAS not mounted")
+    for fmt, root in dests.items():
+        if fmt in meta.get("delivered", []):
+            continue
+        final = []
+        for album in find_albums(jobdir, fmt):
+            rel = album.relative_to(jobdir / "out" / fmt)
+            target = unique_target(root / rel)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target.parent / f".{target.name}.incoming"
+            if tmp.exists():
+                shutil.rmtree(tmp)
+            shutil.copytree(album, tmp)
+            os.rename(tmp, target)
+            final.append(str(target))
+            log(f"delivered {fmt}: {target}")
+        meta.setdefault("delivered", []).append(fmt)
+        meta.setdefault("final", []).extend(final)
+        (jobdir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    with open(Path(cfg["STATE_DIR"]) / "done.tsv", "a", encoding="utf-8") as f:
+        f.write("\t".join([time.strftime("%Y-%m-%d %H:%M:%S"), meta["mb_id"], meta["cddb_id"], meta["cls"],
+                           meta["artist"], meta["album"], "|".join(meta["final"])]) + "\n")
+    shutil.rmtree(jobdir)
+    return meta["final"]
+
+
+def already_ripped(cfg, disc):
+    pending = sorted((Path(cfg["STATE_DIR"]) / "jobs").glob(f"*-{disc.cddb_id}"))
+    for job in pending:  # ripped but not yet delivered to the NAS
+        if (job / "meta.json").exists():
+            meta = json.loads((job / "meta.json").read_text(encoding="utf-8"))
+            return ["pending", disc.mb_id, disc.cddb_id, CLASS_LABEL[meta["cls"]], meta["artist"], meta["album"]]
+    try:
+        for line in (Path(cfg["STATE_DIR"]) / "done.tsv").read_text(encoding="utf-8").splitlines():
+            parts = line.split("\t")
+            if len(parts) > 2 and (parts[1] == disc.mb_id or parts[2] == disc.cddb_id):
+                return parts
+    except FileNotFoundError:
+        pass
+    return None
+
+
+# --------------------------------------------------------------------------- main
+
+def flush(cfg, status):
+    jobs = sorted((Path(cfg["STATE_DIR"]) / "jobs").glob("*/meta.json"))
+    for meta in jobs:
+        jobdir = meta.parent
+        try:
+            meta_data = json.loads(meta.read_text(encoding="utf-8"))
+            deliver_job(jobdir, cfg)
+            log(f"flushed {jobdir.name}")
+            status.set("done", artist=meta_data["artist"], album=meta_data["album"],
+                       cls=CLASS_LABEL[meta_data["cls"]], message="Aufs NAS kopiert")
+        except (RuntimeError, OSError) as e:
+            log(f"{jobdir.name}: {e}")
+    return 0
+
+
+def run(device, cfg, force=False, kids=False, release=None):
+    status = Status()
+    ua = f"cd-ripper/{VERSION}" + (f" ( {cfg['MB_CONTACT']} )" if cfg["MB_CONTACT"] else "")
+    state = Path(cfg["STATE_DIR"])
+    (state / "jobs").mkdir(parents=True, exist_ok=True)
+    (state / "cddb").mkdir(parents=True, exist_ok=True)
+
+    status.set("reading", message="Lese Inhaltsverzeichnis")
+    disc = None
+    for attempt in range(10):  # the drive may still be spinning up
+        try:
+            disc = read_disc(device)
+            break
+        except (RuntimeError, subprocess.CalledProcessError) as e:
+            log(f"read_disc attempt {attempt + 1}: {e}")
+            time.sleep(3)
+    if not disc:
+        status.set("error", message="CD nicht lesbar")
+        return 1
+    log(f"disc {disc.mb_id} cddb {disc.cddb_id} tracks {disc.ntracks}")
+
+    force_flag = RUN_DIR / "force"  # set from the web page: "rip the next disc even if we have it"
+    if force_flag.exists():
+        force = True
+        force_flag.unlink(missing_ok=True)
+    prev = already_ripped(cfg, disc)
+    if prev and not force:
+        log(f"already ripped: {prev}")
+        status.set("done", artist=prev[4], album=prev[5], message="Schon vorhanden", cls=prev[3])
+        return 0
+
+    (RUN_DIR / "correction").unlink(missing_ok=True)
+    kids_flag = kids
+    for name in ("override", "kids"):  # 'override' holds a class name; legacy 'kids' is an empty flag file
+        flag = RUN_DIR / name
+        if flag.exists():
+            text = flag.read_text(errors="replace").strip().upper()
+            kids_flag = text if text in CLASS_LABEL else True
+            flag.unlink(missing_ok=True)
+
+    status.set("reading", message="Suche im Internet")
+    info = None
+    lookup_failed = False  # MusicBrainz unreachable / rate limited: not the same as "does not know this disc"
+    try:
+        if release:
+            info = musicbrainz_release(release, disc.mb_id, disc.ntracks, ua)
+            info["match"] = "release"
+        else:
+            info = musicbrainz_lookup(disc, ua)
+    except RuntimeError as e:
+        log(f"musicbrainz: {e}")
+        lookup_failed = not release
+    if not info and not release:
+        status.set("reading", message="Suche bei GnuDB")
+        info = gnudb_lookup(disc, cfg, ua)
+    if info and info.get("match") in ("fuzzy", "gnudb") or (not info and not lookup_failed):
+        link = attach_link(disc)
+        log(f"disc id not registered at MusicBrainz; attach it to the release: {link}")
+        with open(state / "attach-links.txt", "a", encoding="utf-8") as f:
+            title = f"{info['artist']} - {info['album']}" if info else f"Unbekannte CD (Disc {disc.cddb_id})"
+            f.write(f"{time.strftime('%Y-%m-%d')}\t{title}\t{link}\n")
+    cls, reason = classify(info, kids_flag, load_series(cfg["SERIES_FILE"]), cfg["DISCOGS_TOKEN"], ua)
+    fmts = formats_for(cfg, cls)
+    artist = info["artist"] if info else "Unbekannt"
+    album = info["album"] if info else f"Disc {disc.cddb_id}"
+    log(f"{artist} - {album}: {cls} ({reason}); formats {fmts}")
+    hint = "MusicBrainz war nicht erreichbar - wird vor dem Kopieren aufs NAS noch einmal versucht" \
+        if lookup_failed and not info else ""
+    if info and cfg["LIBRARY_CHECK"] == "1":
+        status.set("reading", message="Suche in der Bibliothek", artist=artist, album=album, cls=CLASS_LABEL[cls])
+        roots = cfg["LIBRARY_ROOTS"].split()
+        if mounts_ready(cfg, roots):
+            have = find_in_library(roots, artist, album, disc.ntracks)
+            if have and have["same"] and not force:
+                log(f"already in the library: {have['path']} ({have['tracks']} files); not ripping")
+                status.set("done", artist=artist, album=album, cls=CLASS_LABEL[cls], tracks=disc.ntracks,
+                           message="Schon in der Bibliothek", library=have["path"],
+                           detect=detection(info, cls, reason, fmts, cfg))
+                return 0
+            if have:
+                hint = (f"Schon in der Bibliothek, wird trotzdem gerippt: {have['path']}" if have["same"] else
+                        f"Ähnliches Album in der Bibliothek: {have['path']} ({have['tracks']} statt {disc.ntracks} Titel)")
+                log(hint)
+        else:
+            log("library check skipped: NAS not mounted")
+    base = {"artist": artist, "album": album, "cls": CLASS_LABEL[cls], "tracks": disc.ntracks,
+            "detect": detection(info, cls, reason, fmts, cfg, hint)}
+    if not fmts:
+        status.set("error", message=f"Kein Ziel für {cls}", **base)
+        return 1
+
+    jobdir = state / "jobs" / f"{time.strftime('%Y%m%d-%H%M%S')}-{disc.cddb_id}"
+    jobdir.mkdir(parents=True)
+    (state / "cddb" / disc.cddb_id).write_text(build_xmcd(disc, info), encoding="utf-8")
+    status.set("ripping", progress=0.0, **base)
+    try:
+        rc = rip(device, jobdir, fmts, disc, status, cfg, base)
+    except Cancelled:
+        shutil.rmtree(jobdir, ignore_errors=True)  # half a disc is no use; the next insert starts fresh
+        raise
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)  # from here on files go to the NAS: finish that
+
+    albums = {fmt: find_albums(jobdir, fmt) for fmt in fmts}
+    counts_ok = all(len(a) == 1 and len(list(a[0].glob(f"*.{fmt}"))) == disc.ntracks
+                    for fmt, a in albums.items())
+    if rc != 0 or not counts_ok:
+        log(f"abcde exit {rc}, counts_ok={counts_ok}; job kept in {jobdir}")
+        status.set("error", message="Rippen fehlgeschlagen", **base)
+        return 1
+
+    # The operator may have corrected the detection on the web page while the disc was ripping.
+    corr = take_correction()
+    new_info, new_cls = info, cls
+    if lookup_failed and not info and not corr.get("release"):  # the rip took minutes; MusicBrainz may be back
+        status.set("ripping", progress=0.99, message="Suche noch einmal bei MusicBrainz", **base)
+        try:
+            late = musicbrainz_lookup(disc, ua)
+        except RuntimeError as e:
+            log(f"musicbrainz (second try): {e}")
+            late = None
+        if late:
+            log(f"second MusicBrainz lookup succeeded: {late['artist']} - {late['album']}")
+            new_info = late
+            new_cls = classify(late, kids_flag, load_series(cfg["SERIES_FILE"]), cfg["DISCOGS_TOKEN"], ua)[0]
+    if corr or new_info is not info:
+        if corr.get("release"):
+            try:
+                new_info = musicbrainz_release(str(corr["release"]), disc.mb_id, disc.ntracks, ua)
+                new_info["match"] = "release"
+                new_cls = classify(new_info, False, load_series(cfg["SERIES_FILE"]), cfg["DISCOGS_TOKEN"], ua)[0]
+            except RuntimeError as e:
+                log(f"correction: release lookup failed: {e}")
+                new_info = info
+        if corr.get("cls") in CLASS_LABEL:
+            new_cls = corr["cls"]
+        need = formats_for(cfg, new_cls)
+        if not need or not set(need) <= set(fmts):
+            log(f"correction: {new_cls} needs {need}, only {fmts} were ripped; class kept")
+            new_cls = cls
+    changed_info = new_info is not info
+    if new_cls != cls or changed_info:
+        log(f"corrected: {cls} -> {new_cls}" + (f", release {new_info['mbid']}" if changed_info else ""))
+        for fmt in set(fmts) - set(formats_for(cfg, new_cls)):
+            shutil.rmtree(jobdir / "out" / fmt, ignore_errors=True)
+        cls, fmts, reason = new_cls, formats_for(cfg, new_cls), ("von Hand korrigiert" if corr else "nachträglich erkannt")
+        if changed_info:
+            info = new_info
+            artist, album = info["artist"], info["album"]
+        base = {"artist": artist, "album": album, "cls": CLASS_LABEL[cls], "tracks": disc.ntracks,
+                "detect": detection(info, cls, reason, fmts, cfg, hint)}
+    status.set("delivering", progress=1.0, message="Kopiere aufs NAS", **base)
+    meta = {"mb_id": disc.mb_id, "cddb_id": disc.cddb_id, "cls": cls, "artist": artist, "album": album,
+            "dests": {fmt: cfg[f"DEST_{cls}_{fmt.upper()}"] for fmt in fmts}}
+    (jobdir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    if changed_info:  # other album: rename and re-tag from the new release
+        try:
+            relabel_job(jobdir, info, cls, cfg, ua)
+        except Exception as e:
+            log(f"correction: relabel failed ({e}); delivering with the original names")
+    else:
+        cover = fetch_cover(info, jobdir / "cover.jpg", ua)
+        for fmt in fmts:
+            album_dir = albums[fmt][0]
+            try:
+                retag(album_dir, fmt, info, disc, cover)
+            except Exception as e:  # tagging problems must not lose a finished rip
+                log(f"retag {fmt} failed: {e}")
+            if cover:
+                shutil.copy(cover, album_dir / "cover.jpg")
+    try:
+        deliver_job(jobdir, cfg)
+    except (RuntimeError, OSError) as e:
+        log(f"delivery postponed: {e}")
+        status.set("error", message="NAS nicht erreichbar - wird später kopiert", **base)
+        return 0
+    status.set("done", message=reason, **base)
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("device", nargs="?", default="/dev/sr0")
+    ap.add_argument("--config", default=os.environ.get("CDRIP_CONF", "/etc/cd-ripper/cd-ripper.conf"))
+    ap.add_argument("--flush", action="store_true", help="deliver finished jobs that are still waiting for the NAS")
+    ap.add_argument("--force", action="store_true", help="rip even if this disc was ripped before")
+    ap.add_argument("--kids", action="store_true", help="treat this disc as a children's audio drama")
+    ap.add_argument("--release", metavar="MBID", help="use this MusicBrainz release id instead of the disc-id lookup")
+    ap.add_argument("--relabel", metavar="JOBDIR", help="re-name/re-tag/re-class a finished job (needs --release), then deliver it")
+    args = ap.parse_args()
+    cfg = load_config(args.config)
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+
+    lock = open(RUN_DIR / "lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        log("another cd-rip is running")
+        return 0
+    if args.flush:
+        return flush(cfg, Status())
+    if args.relabel:
+        if not args.release:
+            log("--relabel needs --release")
+            return 2
+        ua = f"cd-ripper/{VERSION}" + (f" ( {cfg['MB_CONTACT']} )" if cfg["MB_CONTACT"] else "")
+        jobdir = Path(args.relabel)
+        meta = json.loads((jobdir / "meta.json").read_text(encoding="utf-8"))
+        ntracks = len(list(find_albums(jobdir, "mp3")[0].glob("*.mp3")))
+        info = musicbrainz_release(args.release, meta["mb_id"], ntracks, ua)
+        cls, reason = classify(info, args.kids, load_series(cfg["SERIES_FILE"]), cfg["DISCOGS_TOKEN"], ua)
+        log(f"{info['artist']} - {info['album']}: {cls} ({reason})")
+        relabel_job(jobdir, info, cls, cfg, ua)
+        try:
+            deliver_job(jobdir, cfg)
+        except (RuntimeError, OSError) as e:
+            log(f"delivery postponed: {e}")
+        return 0
+    rc = 1
+    signal.signal(signal.SIGTERM, _on_term)  # cd-web finds this process through the lock above
+    try:
+        rc = run(args.device, cfg, args.force, args.kids, args.release)
+    except Cancelled:
+        log("cancelled")
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)  # let the eject below finish
+        Status().set("idle", message="Abgebrochen")
+        rc = 0
+    except Exception as e:
+        log(f"fatal: {e!r}")
+        Status().set("error", message=str(e)[:80])
+    finally:
+        subprocess.run(["eject", args.device], check=False)
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

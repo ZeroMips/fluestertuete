@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+"""cd-ui: status display (16x2 HD44780 LCD or Waveshare 1.5" SSD1327 OLED) and the controls:
+a rotary encoder with push button (turn = class for the NEXT disc, press = back to Auto) or just a
+single button (press = next disc is a children's audio drama).
+
+Reads /run/cd-ripper/status.json written by cd-rip, writes /run/cd-ripper/override.
+Settings come from /etc/cd-ripper/cd-ripper.conf (keys below); anything missing is skipped."""
+import json
+import os
+import socket
+import sys
+import time
+from pathlib import Path
+
+RUN_DIR = Path(os.environ.get("CDRIP_RUN_DIR", "/run/cd-ripper"))
+CONF = os.environ.get("CDRIP_CONF", "/etc/cd-ripper/cd-ripper.conf")
+UI_DEFAULTS = {
+    "UI_DISPLAY": "lcd",                      # lcd | oled | none
+    "LCD_PINS": "22,23,24,25,5,6",            # RS,E,D4,D5,D6,D7 (BCM numbers)
+    "OLED_I2C_ADDR": "0x3C",
+    "ENCODER_PINS": "27,26",                  # CLK,DT ; empty = no encoder
+    "BUTTON_GPIO": "17",                      # encoder push button / single button
+    "BUZZER_GPIO": "",                        # active buzzer (e.g. KY-012) signal pin; empty = no beeps
+}
+CHOICES = [None, "KIDS", "SPOKEN", "MUSIC", "UNSORTED"]
+CHOICE_LABEL = {None: "Auto", "KIDS": "Kinderhoerspiel", "SPOKEN": "Hoerbuch", "MUSIC": "Musik", "UNSORTED": "Unsortiert"}
+
+
+def log(msg):
+    print(msg, file=sys.stderr, flush=True)
+
+
+def load_conf():
+    cfg = dict(UI_DEFAULTS)
+    try:
+        for line in Path(CONF).read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                cfg[k.strip()] = v.strip().strip("\"'")
+    except OSError:
+        pass
+    return cfg
+
+
+def ip_address():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))
+        return s.getsockname()[0]
+    except OSError:
+        return "kein Netz"
+
+
+# ----------------------------------------------------------------------------- 16x2 text rendering
+
+def lcd_encode(text):
+    """Map text to the HD44780 'A00' ROM (the usual 1602 module): ä ö ü ß exist, capitals do not."""
+    table = {"ä": 0xE1, "ö": 0xEF, "ü": 0xF5, "ß": 0xE2, "Ä": ord("A"), "Ö": ord("O"), "Ü": ord("U"),
+             "–": ord("-"), "—": ord("-"), "’": ord("'"), "„": ord('"'), "“": ord('"'), "”": ord('"')}
+    out = []
+    for ch in text:
+        if ch in table:
+            out.append(table[ch])
+        elif 32 <= ord(ch) < 127:
+            out.append(ord(ch))
+        else:
+            out.append(ord("?"))
+    return bytes(out)
+
+
+def fit(text, width=16):
+    text = " ".join(str(text).split())
+    return text[:width].ljust(width)
+
+
+def lcd_lines(st, choice, ip, page=0):
+    """Two 16-character lines for the current state. `page` alternates long texts."""
+    state = st.get("state", "idle")
+    artist, album = st.get("artist", ""), st.get("album", "")
+    if state == "idle":
+        l2 = "Naechste: " + CHOICE_LABEL[choice]
+        return fit("CD einlegen" if page % 2 == 0 else ip), fit(l2 if choice else "Naechste: Auto")
+    if state == "reading":
+        return fit("Lese CD ..."), fit(st.get("message", ""))
+    title = artist if page % 2 == 0 else album
+    if state == "ripping":
+        p = max(0.0, min(1.0, float(st.get("progress", 0))))
+        filled = int(round(p * 10))
+        return fit(title), "[" + "#" * filled + " " * (10 - filled) + "]" + f"{int(p * 100):3d}%"
+    if state == "delivering":
+        return fit(title), fit("Kopiere aufs NAS")
+    if state == "done":
+        return fit("Fertig! " + st.get("cls", "")), fit(album if page % 2 == 0 else st.get("message", ""))
+    return fit("FEHLER"), fit(st.get("message", ""))
+
+
+# ----------------------------------------------------------------------------- displays
+
+class Lcd1602:
+    """HD44780 in 4-bit mode on six GPIOs (RW tied to GND). Backlight is hard-wired."""
+
+    def __init__(self, pins, factory=None):
+        if factory is None:
+            from gpiozero import OutputDevice as factory
+        rs, e, d4, d5, d6, d7 = pins
+        mk = lambda p: factory(p, initial_value=False)
+        self.rs, self.e = mk(rs), mk(e)
+        self.data = [mk(d4), mk(d5), mk(d6), mk(d7)]
+        self.last = None
+        time.sleep(0.05)
+        for nib in (0x3, 0x3, 0x3, 0x2):  # reset sequence into 4-bit mode
+            self._nibble(nib)
+            time.sleep(0.005)
+        for cmd in (0x28, 0x0C, 0x06, 0x01):  # 2 lines/5x8, display on, entry mode, clear
+            self._byte(cmd, False)
+        time.sleep(0.003)
+
+    def _nibble(self, n):
+        for i, pin in enumerate(self.data):
+            pin.value = bool(n >> i & 1)
+        self.e.on()
+        time.sleep(0.000001)
+        self.e.off()
+        time.sleep(0.00005)
+
+    def _byte(self, b, rs):
+        self.rs.value = rs
+        self._nibble(b >> 4)
+        self._nibble(b & 0xF)
+
+    def show(self, l1, l2):
+        if (l1, l2) == self.last:
+            return
+        self.last = (l1, l2)
+        for row, text in enumerate((l1, l2)):
+            self._byte(0x80 | (0x40 * row), False)
+            for b in lcd_encode(text):
+                self._byte(b, True)
+
+    def clear(self):
+        self.last = None
+        self._byte(0x01, False)
+        time.sleep(0.003)
+
+
+class Oled:
+    def __init__(self, addr):
+        from luma.core.interface.serial import i2c
+        from luma.oled.device import ssd1327
+        self.dev = ssd1327(i2c(port=1, address=addr), width=128, height=128)
+
+    def show(self, st, choice, ip):
+        from PIL import Image, ImageDraw, ImageFont
+        d_ = self.dev
+        img = Image.new(d_.mode, d_.size, "black")
+        d = ImageDraw.Draw(img)
+        f = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12)
+        l1, l2 = lcd_lines(st, choice, ip)
+        d.text((2, 4), l1, font=f, fill="white")
+        d.text((2, 24), l2, font=f, fill="white")
+        d_.display(img)
+
+
+# ----------------------------------------------------------------------------- controls
+
+class Controls:
+    def __init__(self, cfg):
+        self.choice_idx = 0
+        self.encoder = self.button = None
+        self.single = not cfg["ENCODER_PINS"].strip()
+        try:
+            from gpiozero import Button, RotaryEncoder
+            if not self.single:
+                clk, dt = [int(x) for x in cfg["ENCODER_PINS"].split(",")]
+                self.encoder = RotaryEncoder(clk, dt, max_steps=0)
+                self.encoder.when_rotated_clockwise = lambda: self._turn(1)
+                self.encoder.when_rotated_counter_clockwise = lambda: self._turn(-1)
+            if cfg["BUTTON_GPIO"].strip():
+                self.button = Button(int(cfg["BUTTON_GPIO"]), pull_up=True, bounce_time=0.05)
+                self.button.when_pressed = self._press
+        except Exception as e:
+            log(f"controls not available: {e}")
+
+    def _write(self):
+        flag = RUN_DIR / "override"
+        choice = CHOICES[self.choice_idx]
+        try:
+            if choice:
+                flag.write_text(choice)
+            else:
+                flag.unlink(missing_ok=True)
+            (RUN_DIR / "kids").unlink(missing_ok=True)
+        except OSError as e:
+            log(f"override write failed: {e}")
+
+    def _turn(self, step):
+        self.choice_idx = (self.choice_idx + step) % len(CHOICES)
+        self._write()
+
+    def _press(self):
+        if self.single:  # one button: toggle "children's audio drama"
+            self.choice_idx = 0 if CHOICES[self.choice_idx] == "KIDS" else 1
+        else:
+            self.choice_idx = 0
+        self._write()
+
+    def current(self):
+        """The choice as stored on disk: cd-rip deletes the file when it uses it."""
+        flag = RUN_DIR / "override"
+        try:
+            text = flag.read_text().strip().upper()
+        except OSError:
+            text = ""
+        if text in CHOICES:
+            self.choice_idx = CHOICES.index(text)
+            return text
+        if (RUN_DIR / "kids").exists():
+            return "KIDS"
+        self.choice_idx = 0
+        return None
+
+
+ALREADY_THERE = (0.08, 0.08, 3)  # three quick beeps: the album was already in the library, nothing was ripped
+
+
+def beep_pattern(prev, new, prev_ts=None, new_ts=None, message=""):
+    """(on_seconds, off_seconds, count) when the state changes to something worth a sound, else None.
+
+    A finished or failed run is also announced when the state is the same as before but the status was
+    rewritten (prev_ts != new_ts): a disc that is skipped within a second goes done -> reading -> done, and
+    a poll can miss the 'reading' in between."""
+    if new == prev and not (new in ("done", "error") and prev_ts != new_ts):
+        return None
+    if new == "done" and message in ("Schon vorhanden", "Schon in der Bibliothek"):
+        return ALREADY_THERE
+    return {"ripping": (0.08, 0.1, 1),      # rip started
+            "done": (0.15, 0.15, 2),        # album finished
+            "error": (0.6, 0.25, 3)}.get(new)
+
+
+def open_buzzer(cfg):
+    if not cfg["BUZZER_GPIO"].strip():
+        return None
+    try:
+        from gpiozero import Buzzer
+        return Buzzer(int(cfg["BUZZER_GPIO"]))
+    except Exception as e:
+        log(f"buzzer not available: {e}")
+        return None
+
+
+def read_status():
+    try:
+        return json.loads((RUN_DIR / "status.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"state": "idle"}
+
+
+def main():
+    cfg = load_conf()
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    lcd = oled = None
+    kind = cfg["UI_DISPLAY"].lower()
+    try:
+        if kind == "lcd":
+            lcd = Lcd1602([int(x) for x in cfg["LCD_PINS"].split(",")])
+        elif kind == "oled":
+            oled = Oled(int(cfg["OLED_I2C_ADDR"], 0))
+    except Exception as e:
+        log(f"display not available: {e}")
+    controls = Controls(cfg)
+    buzzer = open_buzzer(cfg)
+    first = read_status()  # no beep for whatever was already showing at start-up
+    prev_state, prev_ts = first.get("state", "idle"), first.get("ts")
+    ip, ip_at = ip_address(), time.time()
+    last_key, last_change = None, time.time()
+    while True:
+        st, choice = read_status(), controls.current()
+        if time.time() - ip_at > 60:
+            ip, ip_at = ip_address(), time.time()
+        pattern = beep_pattern(prev_state, st.get("state", "idle"), prev_ts, st.get("ts"), st.get("message", ""))
+        prev_state, prev_ts = st.get("state", "idle"), st.get("ts")
+        if buzzer and pattern:
+            buzzer.beep(on_time=pattern[0], off_time=pattern[1], n=pattern[2], background=True)
+        page = int(time.time() // 3)
+        lines = lcd_lines(st, choice, ip, page)
+        key = (json.dumps(st, sort_keys=True), choice, ip)
+        if key != last_key:
+            last_key, last_change = key, time.time()
+        try:
+            if lcd:
+                lcd.show(*lines)
+            if oled:
+                oled.show(st, choice, ip)
+        except Exception as e:
+            log(f"display update failed: {e}")
+        time.sleep(0.25)
+
+
+if __name__ == "__main__":
+    main()

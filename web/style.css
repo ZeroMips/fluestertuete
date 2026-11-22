@@ -88,3 +88,9 @@ main.legal { padding-top: 24px; padding-bottom: 40px; }
 }
 .home-link { color: var(--dim); text-decoration: none; font-size: .9rem; }
 .home-link:hover { color: var(--accent); }
+ul.plain { margin: 0; padding-left: 20px; }
+ul.plain li, ol.steps-plain li { margin: 4px 0; }
+ol.steps-plain { padding-left: 22px; margin: 16px 0 8px; }
+a.button-link { display: inline-block; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--line);
+  background: var(--card); color: var(--text); text-decoration: none; font-size: .9rem; }
+a.button-link:hover { border-color: var(--accent); }

@@ -27,8 +27,9 @@ USB power supply alone, or from an added battery to carry it around.
   after the next scan (every 3 hours, sooner on a Synology through its media server, or at once with "Bibliothek
   neu einlesen").
 - German or English on the device.
-- Optional, with a Raspberry Pi running the CD ripper (separate project): see and steer the ripping station, and
-  play on a Bluetooth speaker ("boombox") next to the Pi instead of the built-in speaker.
+- Optional, with the CD ripping station (a Raspberry Pi with a USB CD drive, `ripstation/`): insert a CD and it
+  ends up on the NAS, identified and sorted, in the folder the device plays. The device shows and steers the
+  station, and can play on a Bluetooth speaker ("boombox") next to the Pi instead of its own speaker.
 
 ## What the NAS needs
 
@@ -56,6 +57,13 @@ one with a self-signed certificate, can be set up under "Erweitert" on the websi
 | Core2 button A / B (below the screen) | back / open | back / play-pause |
 
 The screen goes dark after a minute; the first touch only wakes it.
+
+## CD ripping station
+
+<https://fluestertuete.zeromips.org/ripstation.html> writes three files for the SD card of a fresh Raspberry Pi OS
+Lite (cloud-init): Wi-Fi, the NAS share (SMB, NFS or WebDAV) and its folders. The first boot installs the station
+from the code embedded in those files; then `http://ripstation.local/` shows it, pairs the speaker, and the
+Flüstertüte uses that address as its CD ripper. Details: `ripstation/README.md`.
 
 ## Building
 
@@ -88,7 +96,10 @@ A version tag (`v1.2.3`) builds both boards in CI and publishes the website with
   with the boombox, the same commands to the Pi (`boombox.c`).
 - `main/index.c`, `main/search.c`: the library index and the search over it.
 - `main/i18n.c`: all texts on the device, German and English.
-- `web/`: the setup website (static; esptool-js in `web/vendor/`).
+- `web/`: the website (static; esptool-js in `web/vendor/`): landing page, device setup (`setup.html`), station
+  setup (`ripstation.html`, files from `ripstation-config.js`, checked by `tests/ripstation_check.py`).
+- `ripstation/`: the CD ripping station (Python, systemd): `cd-rip` rips and files, `cd-web` its web page, `cd-bt`
+  the Bluetooth speaker, `install.sh` + `setup-station.py` the setup. `tools/web_bundle.py` packs it for the website.
 - On the Core2's ESP32, internal RAM is the scarce resource: task stacks live in PSRAM, and every flash access goes
   through `main/flash_guard.c` (a task with its stack in PSRAM must not touch flash). The `mem:` log line shows
   what is left once a minute.

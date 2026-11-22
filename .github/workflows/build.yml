@@ -28,7 +28,7 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           apt-get update -qq
-          apt-get install -y -qq build-essential ffmpeg zlib1g-dev nodejs >/dev/null
+          apt-get install -y -qq build-essential ffmpeg zlib1g-dev nodejs python3-yaml cloud-init >/dev/null
 
       - name: Build T-Deck
         run: |

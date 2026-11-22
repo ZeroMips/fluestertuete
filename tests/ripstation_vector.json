@@ -1,0 +1,6 @@
+{
+ "lang": "de", "wifi_ssid": "Kim's \"WLAN\" #1", "wifi_password": "pa: ss#word", "wifi_country": "de",
+ "nas_type": "smb", "nas_url": "//nas/Meine Musik", "nas_user": "kim", "nas_password": "p\"w: #ä\nx",
+ "dir_kids": "Hörspiele", "dir_spoken": "", "dir_music": "", "dir_unsorted": "",
+ "gnudb_contact": "", "web_password": "geheim", "ssh_key": "ssh-ed25519 AAAAC3Nz test@pc", "timezone": "Europe/Berlin"
+}

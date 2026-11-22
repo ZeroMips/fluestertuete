@@ -1,0 +1,9 @@
+[Unit]
+Description=Deliver finished CD rips that were waiting for the NAS
+
+[Service]
+Type=oneshot
+User=ripper
+Group=cdrom
+Environment=LANG=C.UTF-8
+ExecStart=/usr/local/bin/cd-rip --flush

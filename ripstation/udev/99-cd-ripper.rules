@@ -1,0 +1,3 @@
+# An audio CD was inserted (or the drive reported new media): start the rip as a systemd job
+# so udev is not blocked. Data CDs/DVDs have no audio tracks and are ignored.
+SUBSYSTEM=="block", KERNEL=="sr[0-9]*", ENV{ID_CDROM_MEDIA_TRACK_COUNT_AUDIO}=="?*", ACTION=="change", ENV{SYSTEMD_WANTS}="cd-rip@%k.service"

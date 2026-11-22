@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CD-Ripstation einrichten</title>
+<link rel="icon" href="favicon.ico" sizes="48x48">
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="stylesheet" href="style.css">
+<script type="module" src="ripstation.js"></script>
+</head>
+<body>
+<header>
+  <div>
+    <a class="home-link" href="./">&larr; Flüstertüte</a>
+    <h1 data-t="title"></h1>
+    <p class="tagline" data-t="tagline"></p>
+  </div>
+  <nav class="lang" aria-label="Sprache / Language">
+    <button type="button" data-lang="de">Deutsch</button>
+    <button type="button" data-lang="en">English</button>
+  </nav>
+</header>
+
+<main>
+  <p class="note" data-t="privacy"></p>
+
+  <form id="station" autocomplete="off" novalidate>
+    <section>
+      <h2 data-t="s_need"></h2>
+      <ul class="plain">
+        <li data-t="need_pi"></li>
+        <li data-t="need_drive"></li>
+        <li data-t="need_card"></li>
+        <li data-t="need_nas"></li>
+        <li data-t="need_speaker"></li>
+      </ul>
+    </section>
+
+    <section>
+      <h2 data-t="s_net"></h2>
+      <p class="help" data-t="net_hint"></p>
+      <label><span data-t="wifi_ssid"></span><input id="wifi_ssid" maxlength="32"></label>
+      <label><span data-t="wifi_password"></span><input id="wifi_password" type="password" maxlength="63"></label>
+      <label><span data-t="wifi_country"></span>
+        <select id="wifi_country">
+          <option value="DE">Deutschland</option><option value="AT">Österreich</option><option value="CH">Schweiz</option>
+          <option value="LU">Luxembourg</option><option value="NL">Nederland</option><option value="BE">Belgique</option>
+          <option value="FR">France</option><option value="IT">Italia</option><option value="DK">Danmark</option>
+          <option value="GB">United Kingdom</option><option value="IE">Ireland</option><option value="US">United States</option>
+          <option value="CA">Canada</option><option value="AU">Australia</option>
+        </select>
+      </label>
+    </section>
+
+    <section>
+      <h2 data-t="s_nas"></h2>
+      <fieldset class="choices">
+        <legend data-t="nas_type"></legend>
+        <label class="choice"><input type="radio" name="nas_type" value="smb" checked> <span data-t="type_smb"></span></label>
+        <label class="choice"><input type="radio" name="nas_type" value="nfs"> <span data-t="type_nfs"></span></label>
+        <label class="choice"><input type="radio" name="nas_type" value="webdav"> <span data-t="type_webdav"></span></label>
+      </fieldset>
+      <p class="help" id="nas-help"></p>
+      <label><span id="nas_url-label"></span><input id="nas_url"><small id="nas_url-hint"></small></label>
+      <div id="nas-login">
+        <label><span data-t="nas_user"></span><input id="nas_user"></label>
+        <label><span data-t="nas_password"></span><input id="nas_password" type="password"></label>
+      </div>
+    </section>
+
+    <section>
+      <h2 data-t="s_dirs"></h2>
+      <p class="help" data-t="dirs_hint"></p>
+      <label><span data-t="dir_kids"></span><input id="dir_kids" value="Hörspiele"><small data-t="dir_kids_hint"></small></label>
+      <label><span data-t="dir_spoken"></span><input id="dir_spoken" value="Hörbücher"></label>
+      <label><span data-t="dir_music"></span><input id="dir_music" value="Musik"></label>
+      <label><span data-t="dir_unsorted"></span><input id="dir_unsorted" value="Unsortiert"></label>
+    </section>
+
+    <section>
+      <h2 data-t="s_more"></h2>
+      <label><span data-t="lang"></span>
+        <select id="lang"><option value="de">Deutsch</option><option value="en">English</option></select>
+      </label>
+      <label><span data-t="web_password"></span><input id="web_password" type="password"><small data-t="web_password_hint"></small></label>
+      <details>
+        <summary data-t="advanced"></summary>
+        <label><span data-t="gnudb_contact"></span><input id="gnudb_contact" type="email"><small data-t="gnudb_hint"></small></label>
+        <label><span data-t="ssh_key"></span><textarea id="ssh_key" rows="2" spellcheck="false"></textarea><small data-t="ssh_hint"></small></label>
+      </details>
+    </section>
+
+    <section>
+      <h2 data-t="s_files"></h2>
+      <div class="buttons">
+        <button type="button" id="download" class="primary" data-t="btn_download"></button>
+      </div>
+      <ul id="status" aria-live="polite"></ul>
+      <ol class="steps-plain">
+        <li data-t="step_imager"></li>
+        <li data-t="step_copy"></li>
+        <li data-t="step_boot"></li>
+        <li data-t="step_open"></li>
+      </ol>
+      <p class="help" data-t="step_player"></p>
+      <div class="buttons small"><a class="button-link" id="to-setup" href="setup.html?ripper=http%3A%2F%2Fripstation.local" data-t="btn_player"></a></div>
+    </section>
+  </form>
+</main>
+
+<footer>
+  <p><a href="https://github.com/zeromips/fluestertuete" data-t="source"></a> ·
+    <a href="mailto:fluestertuete@zeromips.org">fluestertuete@zeromips.org</a> ·
+    <a href="impressum.html" data-t="imprint"></a> · <a href="datenschutz.html" data-t="privacy_page"></a></p>
+</footer>
+</body>
+</html>

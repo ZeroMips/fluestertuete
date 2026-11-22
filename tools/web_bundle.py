@@ -5,10 +5,13 @@
   tools/web_bundle.py tdeck=build core2=build-core2
 
 The page flashes the files at the offsets the build chose (flasher_args.json) and then the settings block."""
+import gzip
+import io
 import json
 import os
 import shutil
 import sys
+import tarfile
 
 PROJECT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(PROJECT, "web", "firmware")
@@ -35,6 +38,30 @@ def bundle(board, build):
     return manifest
 
 
+def bundle_ripstation():
+    """ripstation/ as web/ripstation/ripstation.tar.gz: the setup page puts it on the station's SD card.
+    Reproducible: sorted names, no times or owners, so an unchanged station gives the same bytes."""
+    src = os.path.join(PROJECT, "ripstation")
+    files = []
+    for dirpath, dirnames, filenames in os.walk(src):
+        dirnames[:] = sorted(d for d in dirnames if d not in ("tests", "__pycache__"))
+        files += [os.path.join(dirpath, f) for f in sorted(filenames)]
+    raw = io.BytesIO()
+    with tarfile.open(fileobj=raw, mode="w", format=tarfile.USTAR_FORMAT) as tar:
+        for path in files:
+            info = tar.gettarinfo(path, arcname=os.path.relpath(path, src))
+            info.mtime, info.uid, info.gid, info.uname, info.gname = 0, 0, 0, "root", "root"
+            info.mode = 0o755 if os.access(path, os.X_OK) else 0o644
+            with open(path, "rb") as f:
+                tar.addfile(info, f)
+    dest = os.path.join(PROJECT, "web", "ripstation")
+    os.makedirs(dest, exist_ok=True)
+    with open(os.path.join(dest, "ripstation.tar.gz"), "wb") as out:
+        with gzip.GzipFile(fileobj=out, mode="wb", mtime=0, filename="") as gz:
+            gz.write(raw.getvalue())
+    print(f"ripstation: {len(files)} files, {os.path.getsize(os.path.join(dest, 'ripstation.tar.gz'))} bytes")
+
+
 def main():
     pairs = [a.split("=", 1) for a in sys.argv[1:]] or [("tdeck", "build"), ("core2", "build-core2")]
     boards = []
@@ -45,6 +72,7 @@ def main():
             print(f"{board}: no build in {build}, skipped")
     json.dump([{k: m[k] for k in ("board", "name", "chip", "version")} for m in boards],
               open(os.path.join(OUT, "index.json"), "w"), indent=1)
+    bundle_ripstation()
 
 
 if __name__ == "__main__":

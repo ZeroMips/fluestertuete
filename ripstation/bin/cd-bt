@@ -1,0 +1,581 @@
+#!/usr/bin/env python3
+"""cd-bt: plays albums from the NAS on a Bluetooth speaker. The Flüstertüte is the remote control.
+
+JSON API on BT_PORT (default 8081), same optional login (WEB_PASSWORD, user "cd") and the same
+X-Requested-With: cd-web header on POSTs as cd-web.
+  GET  /api/bt/status
+  POST /api/bt/play    {"album": "/Hörspiele für Kinder/…", "track": "01 - x.mp3", "pos": seconds}
+  POST /api/bt/toggle | /api/bt/stop | /api/bt/connect               {}
+  POST /api/bt/seek    {"delta": seconds} or {"pos": seconds}
+  POST /api/bt/step    {"dir": 1 | -1}
+  POST /api/bt/jump    {"index": n}
+  POST /api/bt/volume  {"volume": 0..100}
+  POST /api/bt/scan    {}                 -> {"devices": [{"address", "name", "audio", "paired"}]} (about 10 s)
+  POST /api/bt/pair    {"address": MAC}   pairs, trusts and connects it; it replaces any other paired speaker
+  POST /api/bt/forget  {}                 removes the paired speaker
+Album paths are the ones the player sees; BT_SHARE_DIR is the player's stories folder on this machine.
+Playback: mpg123 in remote mode (-R) on the bluez-alsa device of the speaker."""
+import base64
+import functools
+import hmac
+import json
+import os
+import re
+import subprocess
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+CONF = os.environ.get("CDRIP_CONF", "/etc/cd-ripper/cd-ripper.conf")
+DEFAULTS = {"BT_PORT": "8081", "BT_DEVICE": "", "BT_SHARE_DIR": "/mnt/nas/Hörspiele", "BT_VOLUME": "50",
+            "WEB_PASSWORD": ""}
+# Messages go out as a code for the handheld, which shows its own text in its own language, and as German text
+# for people reading the API. The handheld must not depend on this table: it falls back to "message".
+CODES = {
+    "Album zu Ende": "album_end",
+    "Wiedergabe abgebrochen (Boombox aus?)": "playback_aborted",
+    "Keine Boombox gekoppelt": "no_speaker",
+    "Verbinde mit der Boombox …": "connecting",
+    "Boombox nicht erreichbar. Ist sie eingeschaltet?": "speaker_unreachable",
+    "Album nicht gefunden": "album_not_found",
+    "Keine MP3s im Album": "no_mp3s",
+    "Nichts zum Abspielen": "nothing_to_play",
+    "Spielt gerade nicht": "not_playing",
+    "Kein solcher Titel": "no_such_track",
+    "album fehlt": "bad_request",
+    "Koppeln fehlgeschlagen. Ist die Boombox im Kopplungsmodus?": "pair_failed",
+}
+ALBUM_END = "Album zu Ende"
+
+
+def code_of(text):
+    """The code for a message; "mpg123 fehlt: …" -> "mpg123_missing", other player errors -> "player_error"."""
+    if not text:
+        return ""
+    if text.startswith("mpg123 fehlt"):
+        return "mpg123_missing"
+    return CODES.get(text, "player_error")
+
+
+MAC_RE = re.compile(r"^[0-9A-F]{2}(:[0-9A-F]{2}){5}$", re.I)
+
+
+def log(msg):
+    print(msg, file=sys.stderr, flush=True)
+
+
+def load_conf(path=CONF):
+    cfg = dict(DEFAULTS)
+    try:
+        for line in Path(path).read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                cfg[k.strip()] = v.split("#", 1)[0].strip().strip("\"'")
+    except OSError:
+        pass
+    return cfg
+
+
+# ----------------------------------------------------------------------------- files
+
+def _fold(s, i):
+    """Next character for comparison, as the player firmware does it (util.c fold_next):
+    lower case, German letters folded to their base letter, a combining diaeresis ignored."""
+    c = s[i]
+    if c == "̈":
+        i += 1
+        if i == len(s):
+            return 0, i
+        c = s[i]
+    return ord({"ä": "a", "ö": "o", "ü": "u", "ß": "s"}.get(c.lower(), c.lower())), i + 1
+
+
+def nat_cmp(a, b):
+    """Natural, case-insensitive order: "Folge 2" < "Folge 10". Same order the player shows."""
+    i = j = 0
+    while i < len(a) and j < len(b):
+        if a[i].isdigit() and b[j].isdigit():
+            while i < len(a) and a[i] == "0":
+                i += 1
+            while j < len(b) and b[j] == "0":
+                j += 1
+            xs, ys = i, j
+            while i < len(a) and a[i].isdigit():
+                i += 1
+            while j < len(b) and b[j].isdigit():
+                j += 1
+            x, y = a[xs:i], b[ys:j]
+            if len(x) != len(y):
+                return -1 if len(x) < len(y) else 1
+            if x != y:
+                return -1 if x < y else 1
+            continue
+        cx, i = _fold(a, i)
+        cy, j = _fold(b, j)
+        if cx != cy:
+            return -1 if cx < cy else 1
+    if i < len(a):
+        return 1
+    if j < len(b):
+        return -1
+    ea, eb = a.encode(), b.encode()
+    return (ea > eb) - (ea < eb)
+
+
+def is_audio(name):
+    return name.lower().endswith(".mp3") and name[0] not in ".@#"
+
+
+def resolve(share_dir, album):
+    """Maps an album path as the player sees it to a folder here. None if it leaves the share or does not exist.
+
+    The player's top folder may have another name, or sit deeper, than BT_SHARE_DIR here ("/music/Hörspiele/A/B"
+    on the player, /mnt/nas/Hörspiele here): the whole path is tried first, then without its leading folders."""
+    root = os.path.realpath(share_dir)
+    parts = [p for p in album.split("/") if p]
+    for i in range(len(parts)):
+        path = os.path.realpath(os.path.join(root, *parts[i:]))
+        if path != root and not path.startswith(root + os.sep):
+            return None
+        if os.path.isdir(path):
+            return path
+    return None
+
+
+def album_tracks(folder):
+    names = [n for n in os.listdir(folder) if is_audio(n) and os.path.isfile(os.path.join(folder, n))]
+    return sorted(names, key=functools.cmp_to_key(nat_cmp))
+
+
+# ----------------------------------------------------------------------------- speaker
+
+def bt(*args, timeout=15):
+    try:
+        return subprocess.run(["bluetoothctl", *args], capture_output=True, text=True, timeout=timeout).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def speaker_info(mac):
+    out = bt("info", mac, timeout=5)
+    name = re.search(r"^\s*Name: (.*)$", out, re.M)
+    return {"address": mac, "name": name.group(1) if name else "",
+            "paired": "Paired: yes" in out, "connected": "Connected: yes" in out}
+
+
+def find_speaker():
+    """The first paired audio device: one speaker is all this setup has."""
+    for line in bt("devices", "Paired", timeout=5).splitlines():
+        parts = line.split(" ", 2)
+        if len(parts) >= 2 and MAC_RE.match(parts[1]):
+            info = bt("info", parts[1], timeout=5)
+            if re.search(r"Icon: audio-|UUID: Audio Sink", info):
+                return parts[1]
+    return ""
+
+
+def is_audio_device(info):
+    return bool(re.search(r"Icon: audio-|UUID: Audio Sink", info))
+
+
+def parse_devices(text):
+    """[(address, name)] from `bluetoothctl devices` output ("Device AA:BB:… Name")."""
+    out = []
+    for line in text.splitlines():
+        parts = line.strip().split(" ", 2)
+        if len(parts) >= 2 and parts[0] == "Device" and MAC_RE.match(parts[1]):
+            name = parts[2].strip() if len(parts) > 2 else ""
+            out.append((parts[1].upper(), "" if name.replace("-", ":").upper() == parts[1].upper() else name))
+    return out
+
+
+def scan(seconds=10):
+    """Devices nearby, speakers first. A speaker must be in pairing mode to show up."""
+    bt("--timeout", str(seconds), "scan", "on", timeout=seconds + 5)
+    devices = []
+    for mac, name in parse_devices(bt("devices", timeout=5)):
+        info = bt("info", mac, timeout=5)
+        devices.append({"address": mac, "name": name, "audio": is_audio_device(info), "paired": "Paired: yes" in info})
+    devices = [d for d in devices if d["name"] or d["audio"]]  # nameless non-audio beacons are noise
+    return sorted(devices, key=lambda d: (not d["audio"], d["name"].lower()))
+
+
+def paired_speakers():
+    return [mac for mac, _ in parse_devices(bt("devices", "Paired", timeout=5)) if is_audio_device(bt("info", mac, timeout=5))]
+
+
+# ----------------------------------------------------------------------------- player
+
+class Player:
+    """mpg123 -R does the decoding and output; this keeps the album, the track list and the state."""
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.lock = threading.RLock()
+        self.mac = cfg["BT_DEVICE"].upper() if MAC_RE.match(cfg["BT_DEVICE"]) else ""
+        self.speaker = {"address": self.mac, "name": "", "paired": False, "connected": False}
+        self.proc = None
+        self.state = "stopped"  # stopped | connecting | playing | paused | error
+        self.message = ""
+        self.album = ""
+        self.folder = ""
+        self.tracks = []
+        self.index = -1
+        self.pos = 0.0
+        self.dur = 0.0
+        self.rate = 44100
+        self.volume = max(0, min(100, int(cfg["BT_VOLUME"] or 50)))
+        self.own_stop_at = 0.0  # when we last sent LOAD/STOP: an @P 0 right after it is ours, not a track end
+        threading.Thread(target=self._watch, daemon=True).start()
+
+    # -- mpg123
+
+    def _send(self, line):
+        if self.proc and self.proc.poll() is None:
+            try:
+                self.proc.stdin.write(line + "\n")
+                self.proc.stdin.flush()
+                return True
+            except OSError:
+                pass
+        return False
+
+    def _start(self):
+        if self.proc and self.proc.poll() is None:
+            return True
+        dev = f"bluealsa:DEV={self.mac},PROFILE=a2dp"
+        try:
+            self.proc = subprocess.Popen(["mpg123", "-R", "-o", "alsa", "-a", dev], stdin=subprocess.PIPE,
+                                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1,
+                                         encoding="utf-8", errors="replace")
+        except OSError as e:
+            self.state, self.message = "error", f"mpg123 fehlt: {e}"
+            return False
+        threading.Thread(target=self._read, args=(self.proc,), daemon=True).start()
+        self._send("SILENCE")  # no per-frame lines; the position is asked for with SAMPLE
+        self._send(f"VOLUME {self.volume}")
+        return True
+
+    def _read(self, proc):
+        for line in proc.stdout:
+            line = line.strip()
+            with self.lock:
+                if proc is not self.proc:
+                    return
+                if line.startswith("@S "):
+                    f = line.split()
+                    if len(f) > 3 and f[3].isdigit():
+                        self.rate = int(f[3])
+                elif line.startswith("@SAMPLE "):
+                    f = line.split()
+                    if len(f) == 3 and self.rate:
+                        self.pos, self.dur = int(f[1]) / self.rate, int(f[2]) / self.rate
+                elif line == "@P 0":
+                    if time.monotonic() - self.own_stop_at < 2:
+                        pass
+                    elif self.state in ("playing", "paused"):
+                        self._next_track()
+                elif line == "@P 1":
+                    self.state = "paused"
+                elif line == "@P 2":
+                    self.state, self.message = "playing", ""
+                elif line.startswith("@E "):
+                    log(f"mpg123: {line[3:]}")
+                    self.message = line[3:]
+        with self.lock:
+            if proc is self.proc and self.state in ("playing", "paused"):
+                self.state, self.message = "error", "Wiedergabe abgebrochen (Boombox aus?)"
+
+    def _next_track(self):
+        if self.index + 1 < len(self.tracks):
+            self._load(self.index + 1, 0)
+        else:
+            self.state, self.pos, self.message = "stopped", 0.0, ALBUM_END
+
+    def _load(self, index, pos):
+        if not self._start():
+            return False
+        self.own_stop_at = time.monotonic()  # LOAD ends the current track first
+        self.index, self.pos, self.dur = index, float(pos), 0.0
+        self._send("LOAD " + os.path.join(self.folder, self.tracks[index]))
+        if pos > 0:
+            self._send(f"JUMP {int(pos)}s")
+        self.state = "playing"
+        return True
+
+    # -- speaker connection
+
+    def _ensure_speaker(self):
+        if not self.mac:
+            self.mac = find_speaker()
+            if not self.mac:
+                self.state, self.message = "error", "Keine Boombox gekoppelt"
+                return False
+        info = speaker_info(self.mac)
+        if not info["connected"]:
+            # Connecting takes seconds: let status calls through meanwhile. Callers hold the lock exactly once.
+            self.state, self.message = "connecting", "Verbinde mit der Boombox …"
+            self.lock.release()
+            try:
+                bt("connect", self.mac, timeout=15)
+                info = speaker_info(self.mac)
+            finally:
+                self.lock.acquire()
+        self.speaker = info
+        if not info["connected"]:
+            self.state, self.message = "error", "Boombox nicht erreichbar. Ist sie eingeschaltet?"
+            return False
+        return True
+
+    def _watch(self):
+        """Speaker status for the status call, and the position while playing."""
+        last_info = 0.0
+        while True:
+            time.sleep(1)
+            with self.lock:
+                if self.state == "playing":
+                    self._send("SAMPLE")
+                mac = self.mac or ""
+            if time.monotonic() - last_info > 5:
+                last_info = time.monotonic()
+                mac = mac or find_speaker()
+                if mac:
+                    info = speaker_info(mac)
+                    with self.lock:
+                        self.mac = self.mac or mac
+                        self.speaker = info
+
+    # -- API
+
+    def status(self):
+        with self.lock:
+            return {"speaker": dict(self.speaker), "state": self.state, "message": self.message,
+                    "code": code_of(self.message), "finished": self.state == "stopped" and self.message == ALBUM_END,
+                    "album": self.album, "track": self.tracks[self.index] if 0 <= self.index < len(self.tracks) else "",
+                    "index": self.index, "count": len(self.tracks), "pos": round(self.pos, 1),
+                    "dur": round(self.dur, 1), "volume": self.volume}
+
+    def play(self, album, track, pos):
+        folder = resolve(self.cfg["BT_SHARE_DIR"], album)
+        if not folder:
+            return 404, {"error": "Album nicht gefunden"}
+        tracks = album_tracks(folder)
+        if not tracks:
+            return 404, {"error": "Keine MP3s im Album"}
+        known = track in tracks  # an unknown track (renamed meanwhile) starts the album from the top
+        index, start = (tracks.index(track), max(0.0, pos)) if known else (0, 0.0)
+        with self.lock:
+            if not self._ensure_speaker():
+                return 503, {"error": self.message}
+            self.album, self.folder, self.tracks = album, folder, tracks
+            if not self._load(index, start):
+                return 500, {"error": self.message}
+            return 200, self.status()
+
+    def toggle(self):
+        with self.lock:
+            if self.state in ("playing", "paused"):
+                self._send("PAUSE")
+                self.state = "paused" if self.state == "playing" else "playing"
+                return 200, self.status()
+            if self.tracks and self.index >= 0:  # resume after a stop or an error, where it stopped
+                if not self._ensure_speaker():
+                    return 503, {"error": self.message}
+                if self.state == "error" and self.proc:  # its audio device may be gone with the speaker
+                    self.proc.kill()
+                    self.proc = None
+                self._load(self.index, self.pos)
+                return 200, self.status()
+            return 409, {"error": "Nichts zum Abspielen"}
+
+    def stop(self):
+        with self.lock:
+            if self.state in ("playing", "paused"):
+                self.own_stop_at = time.monotonic()
+                self._send("STOP")
+            self.state, self.message = "stopped", ""
+            return 200, self.status()
+
+    def seek(self, delta=None, pos=None):
+        with self.lock:
+            if self.state not in ("playing", "paused"):
+                return 409, {"error": "Spielt gerade nicht"}
+            target = pos if pos is not None else self.pos + delta
+            target = max(0.0, target if not self.dur else min(target, self.dur - 1))
+            self._send(f"JUMP {int(target)}s")
+            self.pos = target
+            return 200, self.status()
+
+    def jump(self, index):
+        with self.lock:
+            if not 0 <= index < len(self.tracks):
+                return 400, {"error": "Kein solcher Titel"}
+            if not self._ensure_speaker():
+                return 503, {"error": self.message}
+            self._load(index, 0)
+            return 200, self.status()
+
+    def step(self, direction):
+        with self.lock:
+            if direction < 0 and self.pos > 3:  # like a CD player: back to the start of this track first
+                index = self.index
+            else:
+                index = self.index + (1 if direction > 0 else -1)
+        return self.jump(index)  # outside the lock: jump() may wait for the speaker to connect
+
+    def set_volume(self, volume):
+        with self.lock:
+            self.volume = max(0, min(100, int(volume)))
+            self._send(f"VOLUME {self.volume}")
+            return 200, self.status()
+
+    def connect(self):
+        with self.lock:
+            ok = self._ensure_speaker()
+            if ok and self.state in ("connecting", "error"):
+                self.state, self.message = "stopped", ""
+            return (200 if ok else 503), self.status()
+
+    def pair(self, mac):
+        """Pair, trust and connect a speaker; it becomes the only one (this setup has one speaker)."""
+        mac = mac.upper()
+        if not MAC_RE.match(mac):
+            raise ValueError("address")
+        self.stop()
+        bt("--timeout", "25", "pair", mac, timeout=30)
+        if "Paired: yes" not in bt("info", mac, timeout=5):
+            return 502, {"error": "Koppeln fehlgeschlagen. Ist die Boombox im Kopplungsmodus?"}
+        bt("trust", mac, timeout=5)
+        for other in paired_speakers():
+            if other != mac:
+                bt("remove", other, timeout=10)
+        bt("connect", mac, timeout=15)
+        with self.lock:
+            self.mac = mac
+            self.speaker = speaker_info(mac)
+            self.state, self.message = "stopped", ""
+            return 200, self.status()
+
+    def forget(self):
+        self.stop()
+        for mac in paired_speakers():
+            bt("remove", mac, timeout=10)
+        with self.lock:
+            self.mac = ""
+            self.speaker = {"address": "", "name": "", "paired": False, "connected": False}
+            return 200, self.status()
+
+
+def handle_post(player, path, data):
+    num = lambda k, d=0: float(data.get(k, d)) if isinstance(data.get(k, d), (int, float)) else d
+    if path == "/api/bt/play":
+        album, track = data.get("album"), data.get("track", "")
+        if not isinstance(album, str) or not isinstance(track, str):
+            return 400, {"error": "album fehlt"}
+        return player.play(album, track, num("pos"))
+    if path == "/api/bt/toggle":
+        return player.toggle()
+    if path == "/api/bt/stop":
+        return player.stop()
+    if path == "/api/bt/seek":
+        return player.seek(pos=num("pos")) if "pos" in data else player.seek(delta=num("delta"))
+    if path == "/api/bt/step":
+        return player.step(int(num("dir", 1)))
+    if path == "/api/bt/jump":
+        return player.jump(int(num("index", -1)))
+    if path == "/api/bt/volume":
+        return player.set_volume(num("volume", player.volume))
+    if path == "/api/bt/connect":
+        return player.connect()
+    if path == "/api/bt/scan":
+        return 200, {"devices": scan()}
+    if path == "/api/bt/pair":
+        if not isinstance(data.get("address"), str):
+            return 400, {"error": "address"}
+        return player.pair(data["address"])
+    if path == "/api/bt/forget":
+        return player.forget()
+    return 404, {"error": "not found"}
+
+
+# ----------------------------------------------------------------------------- HTTP
+
+class Handler(BaseHTTPRequestHandler):
+    cfg = None
+    player = None
+    server_version = "cd-bt"
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def _send(self, code, body):
+        if isinstance(body, dict) and "error" in body and "code" not in body:
+            body = {**body, "code": code_of(body["error"])}
+        raw = json.dumps(body, ensure_ascii=False).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def _authorized(self):
+        pw = self.cfg["WEB_PASSWORD"]
+        if not pw:
+            return True
+        header = self.headers.get("Authorization", "")
+        if header.startswith("Basic "):
+            try:
+                user, _, given = base64.b64decode(header[6:]).decode().partition(":")
+                if user == "cd" and hmac.compare_digest(given, pw):
+                    return True
+            except (ValueError, UnicodeDecodeError):
+                pass
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="CD-Ripper"')
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        return False
+
+    def do_GET(self):
+        if not self._authorized():
+            return
+        if self.path == "/api/bt/status":
+            self._send(200, self.player.status())
+        else:
+            self._send(404, {"error": "not found"})
+
+    def do_POST(self):
+        if not self._authorized():
+            return
+        if self.headers.get("X-Requested-With") != "cd-web":  # cross-site forms cannot set this header
+            return self._send(403, {"error": "forbidden"})
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            data = json.loads(self.rfile.read(min(length, 10000)) or b"{}")
+            if not isinstance(data, dict):
+                raise ValueError
+        except ValueError:
+            return self._send(400, {"error": "bad request"})
+        try:
+            code, body = handle_post(self.player, self.path, data)
+        except (TypeError, ValueError) as e:
+            code, body = 400, {"error": str(e)}
+        self._send(code, body)
+
+
+def main():
+    cfg = load_conf()
+    Handler.cfg = cfg
+    Handler.player = Player(cfg)
+    port = int(cfg["BT_PORT"])
+    srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    log(f"cd-bt listening on port {port}")
+    srv.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,14 @@
+[Unit]
+Description=Rip audio CD from /dev/%I
+After=local-fs.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ripper
+Group=cdrom
+Environment=LANG=C.UTF-8
+ExecStart=/usr/local/bin/cd-rip /dev/%I
+TimeoutStartSec=3h
+Nice=10
+IOSchedulingClass=idle

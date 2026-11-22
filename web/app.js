@@ -433,5 +433,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   const l = initialLang();
   $("lang").value = l;
   setLang(l);
+  // From the CD station page: its address for the ripper field.
+  const ripper = new URLSearchParams(location.search).get("ripper");
+  if (ripper && /^https?:\/\//.test(ripper) && !$("ripper_url").value) $("ripper_url").value = ripper;
   await loadBoards();
 });
