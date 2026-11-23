@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://fluestertuete.zeromips.org/sitemap.xml

@@ -20,6 +20,8 @@ assert mc.pack(v["settings"]).hex() == v["hex"], "make_config.py no longer match
 print("config vector ok (python)")
 P
 if command -v node >/dev/null; then node tests/config_vector.mjs; fi
+# Every text the landing page names exists in home.js (the same step CI uses to prerender it)
+if command -v node >/dev/null; then node tools/prerender.mjs web/index.html $B/index.html; fi
 
 # CD ripping station: its own tests, and the card files the website writes (YAML, cloud-init schema).
 for t in ripstation/tests/test_*.py; do

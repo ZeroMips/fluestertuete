@@ -85,6 +85,7 @@ static const char *const T[S_COUNT][LANG_COUNT] = {
     [S_CD_DONE] = {"CD fertig: %s", "CD done: %s"},
     [S_TYPE_CHANGE_WHILE] = {"Typ \xC3\xA4ndern geht w\xC3\xA4hrend des Rippens", "The type can be changed while ripping"},
     [S_TYPE_CHANGED] = {"Typ ge\xC3\xA4ndert, erkannt war %s", "Type changed, detected: %s"},
+    [S_RIP_WAITING] = {"%d warten aufs NAS, %d fehlgeschlagen", "%d waiting for the NAS, %d failed"},
     [S_TYPE_OF_CD] = {"Typ dieser CD:", "Type of this CD:"},
     [S_OTHER_ALBUM] = {" \xC2\xB7 anderes Album vorgemerkt", " \xC2\xB7 other album chosen"},
     [S_TYPE_SET] = {"Typ: %s", "Type: %s"},

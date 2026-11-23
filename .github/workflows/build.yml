@@ -45,7 +45,9 @@ jobs:
         run: tests/run.sh
 
       - name: Website with firmware
-        run: python3 tools/web_bundle.py
+        run: |
+          python3 tools/web_bundle.py
+          node tools/prerender.mjs  # the German texts into index.html, for search engines and link previews
 
       - uses: actions/upload-pages-artifact@v3
         if: startsWith(github.ref, 'refs/tags/v')

@@ -632,10 +632,12 @@ static void update_ripper(void)
         snprintf(text, sizeof(text), "%s%s%s", st.artist, st.artist[0] && st.album[0] ? " \xE2\x80\x93 " : "", st.album);
     else text[0] = 0;
     set_text(s_rip.title, text);
+    // The station names the class in German (its API contract): show the device's own name for it.
+    const char *cls = st.detected >= 0 ? ripper_cls_name((rip_cls_t)st.detected) : st.cls;
     if (!st.online) snprintf(text, sizeof(text), "%s", tr(S_PI_ON));
-    else if (st.message[0] && st.cls[0]) snprintf(text, sizeof(text), "%s \xC2\xB7 %s", st.cls, st.message);
-    else if (st.message[0] || st.cls[0]) snprintf(text, sizeof(text), "%s", st.message[0] ? st.message : st.cls);
-    else if (st.waiting || st.failed) snprintf(text, sizeof(text), "%d warten aufs NAS, %d fehlgeschlagen", st.waiting, st.failed);
+    else if (st.message[0] && cls[0]) snprintf(text, sizeof(text), "%s \xC2\xB7 %s", cls, st.message);
+    else if (st.message[0] || cls[0]) snprintf(text, sizeof(text), "%s", st.message[0] ? st.message : cls);
+    else if (st.waiting || st.failed) snprintf(text, sizeof(text), tr(S_RIP_WAITING), st.waiting, st.failed);
     else text[0] = 0;
     set_text(s_rip.sub, text);
     if (st.progress >= 0) {
